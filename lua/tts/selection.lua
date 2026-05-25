@@ -106,83 +106,75 @@ end
 function M.get_section()
   local cursor = vim.api.nvim_win_get_cursor(0)
   local current_line = cursor[1]
-  
+
   if is_empty_line(current_line) then
     return ""
   end
-  
+
   local start_line = current_line
   local end_line = current_line
-  
-  -- Go backwards to find start of section
+
   while start_line > 1 do
     local line = vim.api.nvim_buf_get_lines(
       0, start_line - 2, start_line - 1, false
     )[1]
-    -- Stop at markdown headers or horizontal rules ONLY (not empty lines)
     if not line or line:match('^#+%s') or line:match('^---+$') or line:match('^===+$') then
       break
     end
     start_line = start_line - 1
   end
-  
-  -- Go forwards to find end of section
+
   local line_count = vim.api.nvim_buf_line_count(0)
   while end_line < line_count do
     local line = vim.api.nvim_buf_get_lines(
       0, end_line, end_line + 1, false
     )[1]
-    -- Stop at markdown headers or horizontal rules ONLY (not empty lines)
     if not line or line:match('^#+%s') or line:match('^---+$') or line:match('^===+$') then
       break
     end
     end_line = end_line + 1
   end
-  
+
   local lines = vim.api.nvim_buf_get_lines(
     0, start_line - 1, end_line, false
   )
   local result = table.concat(lines, '\n')
-  
+
   return result
 end
 
 function M.get_paragraph()
   local cursor = vim.api.nvim_win_get_cursor(0)
   local current_line = cursor[1]
-  
+
   if is_empty_line(current_line) then
     return ""
   end
-  
+
   local start_line = current_line
   local end_line = current_line
-  
-  -- Go backwards to find start of paragraph
+
   while start_line > 1 do
     local line = vim.api.nvim_buf_get_lines(
       0, start_line - 2, start_line - 1, false
     )[1]
-    -- Stop at empty lines only for paragraphs
     if not line or line:match('^%s*$') then
       break
     end
     start_line = start_line - 1
   end
-  
-  -- Go forwards to find end of paragraph
+
   local line_count = vim.api.nvim_buf_line_count(0)
   while end_line < line_count do
     local line = vim.api.nvim_buf_get_lines(
       0, end_line, end_line + 1, false
     )[1]
-    -- Stop at empty lines only for paragraphs
     if not line or line:match('^%s*$') then
       break
     end
     end_line = end_line + 1
   end
-  
+
   local lines = vim.api.nvim_buf_get_lines(
     0, start_line - 1, end_line, false
   )

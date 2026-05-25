@@ -1,24 +1,26 @@
 local M = {}
 
+M.version = "1.0.0"
+
 local initialized = false
 
 function M.setup(opts)
   if initialized then
     return
   end
-  
+
   local config = require('tts.config')
   config.setup(opts)
-  
+
   local backends = require('tts.backends')
   backends.init()
-  
+
   local cache = require('tts.cache')
   cache.init()
-  
+
   M._setup_commands()
   M._setup_keymaps()
-  
+
   initialized = true
 end
 
@@ -26,13 +28,19 @@ function M._setup_commands()
   vim.api.nvim_create_user_command('TTS', function(cmd)
     if cmd.args and cmd.args ~= '' then
       M.play(cmd.args)
+    elseif cmd.range and cmd.range > 0 then
+      M.play_range(cmd.line1, cmd.line2)
     else
       M.play_selection()
     end
   end, { nargs = '*', range = true })
   
-  vim.api.nvim_create_user_command('TTSPlay', function()
-    M.play_selection()
+  vim.api.nvim_create_user_command('TTSPlay', function(cmd)
+    if cmd.range and cmd.range > 0 then
+      M.play_range(cmd.line1, cmd.line2)
+    else
+      M.play_selection()
+    end
   end, { range = true })
   
   vim.api.nvim_create_user_command('TTSStop', function()
@@ -101,7 +109,7 @@ function M._setup_keymaps()
   
   if keymaps.play then
     map('n', keymaps.play, '<cmd>TTSPlay<cr>', { desc = 'TTS: Play current selection/section' })
-    map('v', keymaps.visual_play or keymaps.play, '<cmd>TTSPlay<cr>', { desc = 'TTS: Play selection' })
+    map('v', keymaps.visual_play or keymaps.play, ':TTSPlay<cr>', { desc = 'TTS: Play selection' })
   end
   
   if keymaps.stop then
@@ -126,25 +134,24 @@ function M._setup_keymaps()
   end
 end
 
-function M.play(text)
+function M.play(text, opts)
+  opts = opts or {}
   if not text or text == '' then
-    -- Don't fallback to play_selection, just notify
     vim.notify('No text provided to play', vim.log.levels.WARN)
     return
   end
-  
+
   local utils = require('tts.utils')
-  local backends = require('tts.backends')
   local config = require('tts.config').get()
-  
-  text = utils.preprocess_text(text)
-  
-  -- Check again after preprocessing
+
+  local original_text = text
+  text = utils.preprocess_text(original_text)
+
   if not text or text == '' then
     vim.notify('Text became empty after preprocessing', vim.log.levels.WARN)
     return
   end
-  
+
   local hooks = config.hooks
   if hooks and hooks.before_play then
     local modified = hooks.before_play(text)
@@ -152,26 +159,31 @@ function M.play(text)
       text = modified
     end
   end
-  
-  backends.speak(text)
-  
+
+  local backends = require('tts.backends')
+  backends.speak(text, opts)
+
   if hooks and hooks.after_play then
     vim.defer_fn(function()
-      hooks.after_play(text)
+      hooks.after_play(original_text)
     end, 100)
   end
 end
 
+function M.play_range(line1, line2)
+  local lines = vim.api.nvim_buf_get_lines(0, line1 - 1, line2, false)
+  M.play(table.concat(lines, '\n'))
+end
+
 function M.play_selection()
-  -- Auto-initialize if not already done
   if not initialized then
     M.setup({})
   end
-  
+
   local selection = require('tts.selection')
   local mode = vim.fn.mode()
   local text
-  
+
   if mode == 'v' or mode == 'V' or mode == '\22' then
     vim.cmd('normal! "vy')
     text = vim.fn.getreg('v')
@@ -187,7 +199,7 @@ function M.play_selection()
       text = selection.get_paragraph()
     end
   end
-  
+
   if text and text ~= '' then
     M.play(text)
   else

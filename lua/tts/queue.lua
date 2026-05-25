@@ -25,11 +25,16 @@ function M.clear()
   queue = {}
   current_index = 0
   is_processing = false
-  
+
   vim.api.nvim_exec_autocmds('User', {
     pattern = 'TTSQueueUpdate',
     data = { action = 'clear', count = 0 }
   })
+end
+
+function M.reset_state()
+  is_processing = false
+  current_index = 0
 end
 
 function M.get_next()
@@ -94,42 +99,47 @@ function M.process_next()
   if is_processing then
     return
   end
-  
+
   local item = M.get_next()
   if not item then
     is_processing = false
-    
+
     local config = require('tts.config').get()
     if config.playback.auto_clear_queue then
       M.clear()
     end
-    
+
     return
   end
-  
+
   is_processing = true
   item.status = 'playing'
-  
+
   local config = require('tts.config').get()
   local hooks = config.hooks
-  
+
   if hooks and hooks.on_queue_item then
     local ok, err = pcall(hooks.on_queue_item, item, current_index, #queue)
     if not ok then
       vim.notify('TTS: Error in on_queue_item hook: ' .. tostring(err), vim.log.levels.ERROR)
     end
   end
-  
+
   local backends = require('tts.backends')
-  local handle = backends.speak(item.text, item.opts)
   
-  if handle then
-    vim.defer_fn(function()
-      item.status = 'completed'
-      is_processing = false
-      M.process_next()
-    end, 100)
-  else
+  local opts_with_callback = vim.tbl_extend('force', item.opts or {}, {
+    on_complete = function()
+      vim.schedule(function()
+        item.status = 'completed'
+        is_processing = false
+        M.process_next()
+      end)
+    end
+  })
+
+  local handle = backends.speak(item.text, opts_with_callback)
+
+  if not handle then
     item.status = 'error'
     is_processing = false
   end
@@ -146,6 +156,7 @@ function M.skip()
   if is_processing then
     local backends = require('tts.backends')
     backends.stop()
+
     is_processing = false
     M.process_next()
   end
@@ -155,6 +166,7 @@ function M.previous()
   if current_index > 1 then
     local backends = require('tts.backends')
     backends.stop()
+
     current_index = current_index - 2
     is_processing = false
     M.process_next()

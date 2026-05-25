@@ -1,0 +1,106 @@
+#!/usr/bin/env lua
+
+-- Test script for markdown filtering
+local utils = require('tts.utils')
+
+-- Test cases with various markdown scenarios
+local test_cases = {
+  {
+    name = "Headers with spaces",
+    input = "# This is a header\n## This is a subheader\n### This is a subsubheader",
+    expected = "This is a header\nThis is a subheader\nThis is a subsubheader"
+  },
+  {
+    name = "Headers without spaces",
+    input = "#header\n##subheader\n###subsubheader",
+    expected = "header\nsubheader\nsubsubheader"
+  },
+  {
+    name = "Mixed content with # characters",
+    input = "Some text #hashtag more text ##doublehashtag end",
+    expected = "Some text hashtag more text doublehashtag end"
+  },
+  {
+    name = "Bold and italic markers",
+    input = "This is **bold** text and *italic* text and ***both*** text",
+    expected = "This is bold text and italic text and both text"
+  },
+  {
+    name = "Strikethrough markers",
+    input = "This is ~~strikethrough~~ text",
+    expected = "This is strikethrough text"
+  },
+  {
+    name = "List markers",
+    input = "- First item\n* Second item\n+ Third item",
+    expected = "First item. Second item. Third item"
+  },
+  {
+    name = "Blockquotes",
+    input = "> This is a quote\n>> Nested quote",
+    expected = "This is a quote\nNested quote"
+  },
+  {
+    name = "Complex markdown mix",
+    input = "# Main Title\nSome **bold** text with #hashtag\n> Quote with *italic*\n- List item with ~~strike~~",
+    expected = "Main Title\nSome bold text with hashtag\nQuote with italic. List item with strike"
+  },
+  {
+    name = "Code blocks",
+    input = "```lua\nlocal x = #comment\n```\nSome text with `inline code`",
+    expected = " local x = comment \nSome text with inline code"
+  },
+  {
+    name = "Links and images",
+    input = "[link text](url) and ![alt](image.png)",
+    expected = "link text and "
+  },
+  {
+    name = "Horizontal rules",
+    input = "Text above\n---\nText below\n***\nMore text",
+    expected = "Text above\nText below\nMore text"
+  },
+  {
+    name = "Emphasis without proper pairing",
+    input = "Text with *single asterisk and _single underscore",
+    expected = "Text with single asterisk and single underscore"
+  },
+  {
+    name = "Multiple consecutive markers",
+    input = "****Multiple asterisks**** and ____underscores____",
+    expected = "Multiple asterisks and underscores"
+  }
+}
+
+-- Run tests
+local passed = 0
+local failed = 0
+
+print("Testing markdown filtering...")
+print("=" .. string.rep("=", 50))
+
+for i, test in ipairs(test_cases) do
+  local result = utils.clean_markdown_text(test.input)
+  local success = result == test.expected
+  
+  if success then
+    passed = passed + 1
+    print(string.format("✅ Test %d: %s", i, test.name))
+  else
+    failed = failed + 1
+    print(string.format("❌ Test %d: %s", i, test.name))
+    print("   Input:    " .. tostring(test.input):gsub("\n", "\\n"))
+    print("   Expected: " .. tostring(test.expected):gsub("\n", "\\n"))
+    print("   Got:      " .. tostring(result):gsub("\n", "\\n"))
+    print()
+  end
+end
+
+print("=" .. string.rep("=", 50))
+print(string.format("Results: %d passed, %d failed", passed, failed))
+
+if failed == 0 then
+  print("🎉 All tests passed!")
+else
+  print("⚠️  Some tests failed - review the output above")
+end

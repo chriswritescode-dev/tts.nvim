@@ -193,7 +193,6 @@ function M.stop()
 		end
 		current_job = nil
 	end
-
 	local state = require('tts.state')
 	state.transition('stopped')
 
@@ -209,4 +208,3 @@ function M.get_current_player()
 end
 
 return M
-

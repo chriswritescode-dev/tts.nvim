@@ -37,20 +37,21 @@ function M.speak(text, opts)
   local cmd = 'say ' .. table.concat(args, ' ')
   
   if opts.async ~= false then
-    return M._execute_async(cmd)
+    return M._execute_async(cmd, opts)
   else
     return vim.fn.system(cmd)
   end
 end
 
-function M._execute_async(cmd)
+function M._execute_async(cmd, opts)
+  opts = opts or {}
   if current_job then
     M.stop()
   end
-  
+
   local stdout = vim.loop.new_pipe(false)
   local stderr = vim.loop.new_pipe(false)
-  
+
   current_job = vim.loop.spawn('sh', {
     args = { '-c', cmd },
     stdio = { nil, stdout, stderr }
@@ -65,20 +66,24 @@ function M._execute_async(cmd)
       current_job:close()
       current_job = nil
     end
-    
+
     vim.schedule(function()
       local state = require('tts.state')
       if state then
         state.transition('idle')
       end
-      
+
       vim.api.nvim_exec_autocmds('User', {
         pattern = 'TTSPlayEnd',
         data = { backend = 'macos' }
       })
+
+      if opts.on_complete then
+        opts.on_complete(code)
+      end
     end)
   end)
-  
+
   return {
     stop = function()
       M.stop()

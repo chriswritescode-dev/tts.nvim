@@ -1,0 +1,59 @@
+" Test single-line list pause handling
+lua << EOF
+-- Add development directory to path
+package.path = "/Users/chris/development/tts.nvim/lua/?.lua;" .. package.path
+local utils = require('tts.utils')
+
+-- Test cases for single-line list items
+local test_cases = {
+  {
+    name = "Single-line bullet list",
+    input = "First item - Second item * Third item + Fourth item",
+    expected = "First item. Second item. Third item. Fourth item"
+  },
+  {
+    name = "Single-line numbered list",
+    input = "First item 1. Second item 2. Third item 3. Fourth item",
+    expected = "First item. Second item. Third item. Fourth item"
+  },
+  {
+    name = "Mixed single-line lists",
+    input = "Text - bullet * item 1. numbered + more",
+    expected = "Text. bullet. item. numbered. more"
+  },
+  {
+    name = "Multi-line lists (should still work)",
+    input = "First item\n- Second item\n* Third item\n1. Fourth item\n2. Fifth item",
+    expected = "First item. Second item. Third item. Fourth item. Fifth item"
+  },
+  {
+    name = "No list markers (should not add periods)",
+    input = "Just regular text with no lists",
+    expected = "Just regular text with no lists"
+  },
+  {
+    name = "Edge case - numbers not as list markers",
+    input = "The version 2.0 is better than 1.0 for sure",
+    expected = "The version 2.0 is better than 1.0 for sure"
+  }
+}
+
+print("Testing single-line list pause handling...")
+print("=" .. string.rep("=", 60))
+
+for i, test in ipairs(test_cases) do
+  local result = utils.clean_markdown_text(test.input)
+  local success = result == test.expected
+  
+  if success then
+    print(string.format("✅ Test %d: %s", i, test.name))
+  else
+    print(string.format("❌ Test %d: %s", i, test.name))
+    print("   Input:    " .. tostring(test.input):gsub("\n", "\\n"))
+    print("   Expected: " .. tostring(test.expected):gsub("\n", "\\n"))
+    print("   Got:      " .. tostring(result):gsub("\n", "\\n"))
+  end
+end
+
+print("=" .. string.rep("=", 60))
+EOF

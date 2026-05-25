@@ -77,6 +77,9 @@ function M.stop()
 
 		local state = require('tts.state')
 		state.transition('stopped')
+		
+		local queue = require('tts.queue')
+		queue.reset_state()
 	end
 end
 

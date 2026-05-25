@@ -1,6 +1,7 @@
 # tts.nvim
 
-A comprehensive text-to-speech plugin for Neovim with support for macOS native speech synthesis and OpenAI-compatible TTS endpoints.  This plugin allows you to have your text read aloud directly within Neovim. I created it for use with  [obsidian.nvim](https://github.com/epwalsh/obsidian.nvim). I did not find anything else like it.
+A comprehensive text-to-speech plugin for Neovim with support for macOS native speech synthesis and OpenAI-compatible TTS endpoints. This plugin allows you to have your text read aloud directly within Neovim. I created it for use with [obsidian.nvim](https://github.com/epwalsh/obsidian.nvim). I did not find anything else like it.
+
 ## TL;DR
 
 ```lua
@@ -43,7 +44,7 @@ Using [lazy.nvim](https://github.com/folke/lazy.nvim):
     require('tts').setup({
       -- Backend selection: 'auto', 'macos', 'openai'
       backend = 'auto',
-      
+
       -- macOS configuration
       macos = {
         voice = 'Alex',
@@ -53,7 +54,7 @@ Using [lazy.nvim](https://github.com/folke/lazy.nvim):
         pitch = nil,             -- Voice pitch
         modulation = nil,        -- Voice modulation
       },
-      
+
       -- OpenAI configuration
       openai = {
         api_key = vim.env.OPENAI_API_KEY,
@@ -65,7 +66,7 @@ Using [lazy.nvim](https://github.com/folke/lazy.nvim):
         headers = {},            -- Custom headers
         timeout = 30,            -- Request timeout in seconds
       },
-      
+
       -- Playback behavior
       playback = {
         auto_clear_queue = false,
@@ -76,7 +77,7 @@ Using [lazy.nvim](https://github.com/folke/lazy.nvim):
         player_args = {},                    -- Custom player arguments
         default_selection = 'section',       -- Default text selection: 'line', 'paragraph', 'section'
       },
-      
+
       -- Cache settings
       cache = {
         enabled = true,
@@ -85,7 +86,7 @@ Using [lazy.nvim](https://github.com/folke/lazy.nvim):
         max_age = 7,             -- days
         cleanup_on_start = true,
       },
-      
+
       -- Custom keymaps
       keymaps = {
         play = '<leader>tp',
@@ -96,7 +97,7 @@ Using [lazy.nvim](https://github.com/folke/lazy.nvim):
         prev = '<leader>tN',
         visual_play = '<leader>tp',
       },
-      
+
       -- Text preprocessing
       preprocessing = {
         clean_markdown = true,           -- Remove markdown syntax
@@ -111,7 +112,7 @@ Using [lazy.nvim](https://github.com/folke/lazy.nvim):
           ['NOTE:?'] = 'note',
           ['WARNING:?'] = 'warning',
           ['TIP:?'] = 'tip',
-          
+
           -- Technical acronyms
           ['API'] = 'A P I',
           ['URL'] = 'U R L',
@@ -124,12 +125,12 @@ Using [lazy.nvim](https://github.com/folke/lazy.nvim):
           ['TS'] = 'TypeScript',
           ['AI'] = 'artificial intelligence',
           ['TL;DR'] = 'too long did not read',
-          
+
           -- Common abbreviations
           ['etc.'] = 'etcetera',
           ['i.e.'] = 'that is',
           ['e.g.'] = 'for example',
-          
+
           -- Custom identifiers
           -- ['MyApp'] = 'my app',
           -- ['BigCorp'] = 'big corp',
@@ -155,7 +156,7 @@ Using [lazy.nvim](https://github.com/folke/lazy.nvim):
           },
         },
       },
-      
+
       -- Hooks
       hooks = {
         before_play = nil,              -- function(text) return modified_text end
@@ -166,7 +167,7 @@ Using [lazy.nvim](https://github.com/folke/lazy.nvim):
         end,
         on_queue_item = nil,            -- function(item, index, total) end
       },
-      
+
       -- Notifications
       notifications = {
         level = vim.log.levels.INFO,
@@ -393,4 +394,3 @@ tts.set_voice("alloy")
 tts.clear_cache()
 tts.get_cache_stats()
 ```
-

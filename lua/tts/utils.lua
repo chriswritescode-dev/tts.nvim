@@ -1,5 +1,30 @@
 local M = {}
 
+local function apply_replacements(text, replacements)
+  local ordered_replacements = {}
+
+  for pattern, replacement in pairs(replacements) do
+    table.insert(ordered_replacements, {
+      pattern = pattern,
+      replacement = replacement,
+    })
+  end
+
+  table.sort(ordered_replacements, function(a, b)
+    if #a.pattern == #b.pattern then
+      return a.pattern < b.pattern
+    end
+
+    return #a.pattern > #b.pattern
+  end)
+
+  for _, item in ipairs(ordered_replacements) do
+    text = text:gsub(item.pattern, item.replacement)
+  end
+
+  return text
+end
+
 function M.preprocess_text(text)
   local config = require('tts.config').get()
   local preprocessing = config.preprocessing
@@ -43,18 +68,24 @@ function M.preprocess_text(text)
   end
   
   if preprocessing.replacements then
-    for pattern, replacement in pairs(preprocessing.replacements) do
-      text = text:gsub(pattern, replacement)
-    end
+    text = apply_replacements(text, preprocessing.replacements)
   end
   
   local filetype = vim.bo.filetype
   if preprocessing.languages and preprocessing.languages[filetype] then
-    for pattern, replacement in pairs(preprocessing.languages[filetype]) do
-      text = text:gsub(pattern, replacement)
-    end
+    text = apply_replacements(text, preprocessing.languages[filetype])
   end
   
+  -- Add periods at end of lines for natural pauses (before normalizing whitespace)
+  if preprocessing.add_line_breaks then
+    -- Add period at end of lines that don't already end with punctuation
+    text = text:gsub('([^%.!?:,;])%s*\n', '%1. ')
+  end
+  
+  -- Strip problematic characters that TTS engines struggle with
+  text = text:gsub('#', '')
+  text = text:gsub('/', '')
+
   -- Final cleanup
   text = text:gsub('%s+', ' ')  -- Normalize whitespace
   text = text:gsub('^%s*[%-%*%+]%s+', '')  -- Remove leading list markers
@@ -73,16 +104,13 @@ function M.clean_markdown_text(text)
   
   -- Handle code blocks based on configuration
   if preprocessing.skip_code_blocks then
-    -- Remove code blocks entirely (default behavior)
-    text = text:gsub('```[^\\n]*\\n.-\\n```', ' ')
-    text = text:gsub('~~~[^\\n]*\\n.-\\n~~~', ' ')
-    text = text:gsub('`([^`]+)`', ' ')
+    text = text:gsub('```[^\n]*\n.-\n```', ' ')
+    text = text:gsub('~~~[^\n]*\n.-\n~~~', ' ')
   else
-    -- Replace with verbal indicators (for users who want code read)
-    text = text:gsub('```[^\\n]*\\n.-\\n```', ' code block ')
-    text = text:gsub('~~~[^\\n]*\\n.-\\n~~~', ' code block ')
-    text = text:gsub('`([^`]+)`', ' code ')
+    text = text:gsub('```[^\n]*\n(.-)\n```', ' %1 ')
+    text = text:gsub('~~~[^\n]*\n(.-)\n~~~', ' %1 ')
   end
+  text = text:gsub('`([^`\n]+)`', '%1')
   
   -- Remove images
   text = text:gsub('!%[.-%]%(.-%)', '')
@@ -97,18 +125,49 @@ function M.clean_markdown_text(text)
   -- Remove HTML tags
   text = text:gsub('<[^>]+>', '')
   
-  -- Remove markdown headers (keep the text)
-  text = text:gsub('^#+%s*(.-)$', '%1')
-  text = text:gsub('\n#+%s*', '\n')
+  -- Remove footnote references [^1] and footnote definitions [^1]:
+  text = text:gsub('%[%^[%w_%-]+%]', '')
+  text = text:gsub('%[%^[%w_%-]+%]:', '')
   
-  -- Remove horizontal rules
-  text = text:gsub('^%-%-%-+%s*$', '')
-  text = text:gsub('^%*%*%*+%s*$', '')
-  text = text:gsub('^___+%s*$', '')
+  -- Remove math blocks (LaTeX-style)
+  text = text:gsub('%$%$.-%$%$', ' math expression ')
+  text = text:gsub('%$([^%$\n]+)%$', ' math ')
+  
+  -- Remove markdown tables (pipes and alignment markers)
+  text = text:gsub('|', ' ')
+  text = text:gsub(':?%-%-+:?', '')
+  
+  -- Remove markdown headers (keep the text)
+  -- Handle headers at start of lines only, preserving # in other contexts
+  text = text:gsub('^(#+)%s+(.-)$', '%2')
+  text = text:gsub('\n(#+)%s+', '\n')
+  text = text:gsub('#+', '')
+  
+  -- Remove horizontal rules (handle multiline by processing each line)
+  text = text:gsub('\n%-%-%-+%s*\n', '\n')
+  text = text:gsub('\n%*%*%*+%s*\n', '\n')
+  text = text:gsub('\n___+%s*\n', '\n')
+  text = text:gsub('\n%s*\n+', '\n')
+  text = text:gsub('^%-%-%-+%s*\n', '')
+  text = text:gsub('^%*%*%*+%s*\n', '')
+  text = text:gsub('^___+%s*\n', '')
+  text = text:gsub('\n%-%-%-+%s*$', '')
+  text = text:gsub('\n%*%*%*+%s*$', '')
+  text = text:gsub('\n___+%s*$', '')
   
   -- Remove blockquotes
   text = text:gsub('^>+%s*', '')
   text = text:gsub('\n>+%s*', '\n')
+  
+  -- Remove list markers but add pauses between items for better speech flow
+  text = text:gsub('^%s*[-*+]%s+', '')
+  text = text:gsub('\n%s*[-*+]%s+', '. ')  -- Add period for pause between list items
+  text = text:gsub('(%S)%s+[-*+]%s+', '%1. ')  -- Add period for pause in single-line lists
+  
+  -- Remove numbered list markers and add pauses
+  text = text:gsub('^%s*%d+%.%s+', '')
+  text = text:gsub('\n%s*%d+%.%s+', '. ')  -- Add period for pause between numbered items
+  text = text:gsub('(%S)%s+%d+%.%s+', '%1. ')  -- Add period for pause in single-line numbered lists
   
   -- Remove emphasis markers (bold, italic) - non-greedy matching
   text = text:gsub('%*%*%*(.-)%*%*%*', '%1')  -- Bold + italic
@@ -118,29 +177,27 @@ function M.clean_markdown_text(text)
   text = text:gsub('_([^_]+)_', '%1')  -- Italic (non-greedy)
   text = text:gsub('~~(.-)~~', '%1')  -- Strikethrough
   
-  -- Remove list markers but add pauses between items for better speech flow
-  text = text:gsub('^%s*[%-%*%+]%s+', '')
-  text = text:gsub('\n%s*[%-%*%+]%s+', '. ')  -- Add period for pause between list items
+  -- Remove any remaining markdown characters anywhere in text
+  text = text:gsub('[*_~`]+', '')  -- Remove *, _, ~, ` characters
+  -- Only remove empty brackets/parentheses, not ones with content
+  text = text:gsub('%[%]', '')  -- Empty brackets
+  text = text:gsub('%(%)' , '')  -- Empty parentheses
   
-  -- Remove numbered list markers and add pauses
-  text = text:gsub('^%s*%d+%.%s+', '')
-  text = text:gsub('\n%s*%d+%.%s+', '. ')  -- Add period for pause between numbered items
-  
-  -- Remove task list markers
-  text = text:gsub('%[[ x]%]%s*', '')
+  -- Remove task list markers (case-insensitive for [x] and [X])
+  text = text:gsub('%[[ xX]%]%s*', '')
   
   -- Remove emoji shortcodes
   text = text:gsub(':[%w_%-]+:', '')
   
-  -- Clean up URLs but keep surrounding text
-  text = text:gsub('https?://[%w%-%._~:/%?#%[%]@!%$&\'%(%)%*%+,;=]+', ' ')
-  text = text:gsub('www%.[%w%-%._~:/%?#%[%]@!%$&\'%(%)%*%+,;=]+', ' ')
-  text = text:gsub('ftp://[%w%-%._~:/%?#%[%]@!%$&\'%(%)%*%+,;=]+', ' ')
+  -- Remove all Unicode emoji characters using comprehensive ranges (if enabled)
+  if preprocessing.remove_emoji then
+    text = M.remove_emoji(text)
+  end
   
-  -- Don't remove file paths too aggressively - they might be part of sentences
-  -- Only remove obvious ones
-  text = text:gsub('%s/[%w%-%._~/]+%.%w+', ' ')  -- Remove paths with extensions
-  text = text:gsub('^/[%w%-%._~/]+%.%w+', '')    -- At start of line
+  -- Clean up URLs but keep surrounding text
+  text = text:gsub('https?://[%w%-%._~:/%?#%[%]@!%$&\'%(%)%*%+,;=]+', ' url ')
+  text = text:gsub('www%.[%w%-%._~:/%?#%[%]@!%$&\'%(%)%*%+,;=]+', ' url ')
+  text = text:gsub('ftp://[%w%-%._~:/%?#%[%]@!%$&\'%(%)%*%+,;=]+', ' url ')
   
   -- Final safety check - if we've removed everything, return the original
   if text:match('^%s*$') then
@@ -151,101 +208,79 @@ function M.clean_markdown_text(text)
 end
 
 function M.clean_code_text(text)
-  -- Remove comments (various languages)
-  text = text:gsub('//.-\\n', '\\n')  -- C-style comments
-  text = text:gsub('//.-$', '')
-  text = text:gsub('/%*.-%*/', ' ')  -- Multi-line C comments
-  text = text:gsub('#.-\\n', '\\n')  -- Python/Shell comments
-  text = text:gsub('#.-$', '')
-  text = text:gsub('%-%-.-\\n', '\\n')  -- Lua comments
-  text = text:gsub('%-%-.-$', '')
-  text = text:gsub('""".-"""', ' ')  -- Python docstrings
-  text = text:gsub("'''.-'''", ' ')
-
-  -- Remove common code syntax
-  text = text:gsub('::', ' ')  -- C++ scope resolution
-  text = text:gsub('%->', ' ')  -- C pointer access
-  text = text:gsub('=>', ' ')  -- Arrow functions
+  text = text:gsub('===', ' strictly equals ')
+  text = text:gsub('!==', ' not strictly equal ')
+  text = text:gsub('==', ' equals ')
+  text = text:gsub('~=', ' not equal ')
+  text = text:gsub('!=', ' not equal ')
   text = text:gsub('<=', ' less than or equal ')
   text = text:gsub('>=', ' greater than or equal ')
-  text = text:gsub('==', ' equals ')
-  text = text:gsub('!=', ' not equal ')
   text = text:gsub('&&', ' and ')
   text = text:gsub('||', ' or ')
-  text = text:gsub('<<', ' ')  -- Bit shift
+  text = text:gsub('%.%.', ' concatenate ')
+  
+  text = text:gsub('=>', ' ')
+  text = text:gsub('%->', ' ')
+  text = text:gsub('::', ' ')
+  text = text:gsub('<<', ' ')
   text = text:gsub('>>', ' ')
-
-  -- Remove import/include statements
-  text = text:gsub('import%s+[%w%.]+', '')
-  text = text:gsub('from%s+[%w%.]+%s+import%s+[%w%.]+', '')
-  text = text:gsub('#include%s*[<"].-[>"]', '')
-  text = text:gsub('require%(["\'][^"\']+["\']%)', '')
-
-  -- Remove function signatures and type annotations
-  text = text:gsub(':%s*[%w%[%]%|%<%>]+%s*[%=%,%)%{]', ' ')  -- Type annotations
-  text = text:gsub('function%s*%(.-%)%s*{?', '')
-  text = text:gsub('def%s+%w+%s*%(.-%)%s*:', '')
-
-  -- Remove variable declarations
-  text = text:gsub('const%s+', '')
-  text = text:gsub('let%s+', '')
-  text = text:gsub('var%s+', '')
-  text = text:gsub('local%s+', '')
-
-  -- Remove special characters used in code
-  text = text:gsub(';', '.')  -- Semicolons to periods
-  text = text:gsub(':', '.')  -- Colons to periods (except in sentences)
-  text = text:gsub('{', '')
-  text = text:gsub('}', '')
-  text = text:gsub('%[', '')
-  text = text:gsub('%]', '')
-  text = text:gsub('%(', '')
-  text = text:gsub('%)', '')
+  
+  text = text:gsub('%+', ' plus ')
+  text = text:gsub('%-', ' minus ')
+  text = text:gsub('%*', ' times ')
+  text = text:gsub('%%', ' modulo ')
+  text = text:gsub('=', ' equals ')
+  text = text:gsub('<', ' less than ')
+  text = text:gsub('>', ' greater than ')
+  text = text:gsub('&', ' and ')
+  text = text:gsub('|', ' or ')
+  text = text:gsub('!', ' not ')
+  text = text:gsub('%^', ' to the power of ')
+  text = text:gsub('~', ' tilde ')
+  text = text:gsub('@', ' at ')
+  text = text:gsub('#', ' hash ')
+  text = text:gsub('%$', ' dollar ')
+  
+  text = text:gsub('/', ' ')
+  text = text:gsub('\\', ' ')
+  
+  text = text:gsub(';', '.')
+  
+  text = text:gsub('%s+', ' ')
+  text = vim.trim(text)
 
   return text
 end
 
 function M.clean_paths_and_urls(text)
-  -- Remove file paths (Unix, Windows, relative) - be very conservative to avoid false positives like "line/paragraph"
-  -- Only match paths with extensions or multiple directory separators
-  text = text:gsub('[%w%-%._~:/]+/[%w%-%._~:/]+%.%w+', ' file path ')  -- Unix paths with extensions (e.g., path/to/file.txt)
-  text = text:gsub('[A-Za-z]:[\\][%w%-%._~:\\]+', ' file path ')  -- Windows paths
-  text = text:gsub('[%w%-%._~]+/[%w%-%._~]+/[%w%-%._~]+', ' file path ')  -- Paths with at least 2 slashes (e.g., path/to/dir)
-  text = text:gsub('%./[%w%-%._~/]+', ' file path ')  -- Relative paths starting with ./
-  text = text:gsub('%.%./[%w%-%._~/]+', ' file path ')  -- Parent paths starting with ../
-  
-  -- Remove URLs more comprehensively
+  text = text:gsub('%.%.?/[%w%-%._~]+[%w%-%._~/]*', ' file path ')
+  text = text:gsub('/[%w%-%._~]+/[%w%-%._~%.]+[%w%-%._~/]*', ' file path ')
+  text = text:gsub('[A-Za-z]:\\[%w%-%._~\\]+', ' file path ')
+
   text = text:gsub('https?://[%w%-%._~:/?%#[%]@!%$&\'%(%)*%+,;=]+', ' url ')
   text = text:gsub('www%.[%w%-%._~:/?%#[%]@!%$&\'%(%)*%+,;=]+', ' url ')
   text = text:gsub('ftp://[%w%-%._~:/?%#[%]@!%$&\'%(%)*%+,;=]+', ' url ')
-  
-  -- Remove git references
-  text = text:gsub('[%w%-%._]+@{%w+}', ' git reference ')  -- branch@{upstream}
-  text = text:gsub('HEAD[~^]%d+', ' git reference ')  -- HEAD~1, HEAD^2
-  text = text:gsub('[a-f0-9]{7,40}', ' commit hash ')  -- Git commit hashes
-  
-  -- Remove network paths
-  text = text:gsub('\\\\[%w%-%._$]+\\[%w%-%._$]+', ' network path ')  -- Windows UNC paths
+
+  text = text:gsub('[%w%-%._]+@{%w+}', ' git reference ')
+  text = text:gsub('HEAD[~^]%d+', ' git reference ')
+
+  text = text:gsub('\\\\[%w%-%._$]+\\[%w%-%._$]+', ' network path ')
   text = text:gsub('smb://[%w%-%._~:/?%#[%]@!%$&\'%(%)*%+,;=]+', ' network path ')
-  
+
   return text
 end
 
 function M.clean_smart_content(text)
-  -- Remove UUIDs
-  text = text:gsub('[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}', ' uuid ')
+  -- Remove UUIDs (8-4-4-4-12 hex pattern)
+  text = text:gsub('[a-f0-9][a-f0-9][a-f0-9][a-f0-9][a-f0-9][a-f0-9][a-f0-9][a-f0-9]%-[a-f0-9][a-f0-9][a-f0-9][a-f0-9]%-[a-f0-9][a-f0-9][a-f0-9][a-f0-9]%-[a-f0-9][a-f0-9][a-f0-9][a-f0-9]%-[a-f0-9][a-f0-9][a-f0-9][a-f0-9][a-f0-9][a-f0-9][a-f0-9][a-f0-9][a-f0-9][a-f0-9][a-f0-9][a-f0-9]', ' uuid ')
   
   -- Remove binary/hex data
   text = text:gsub('0[xX][a-fA-F0-9]+', ' hex value ')
-  text = text:gsub('U%+[a-fA-F0-9]{1,6}', ' unicode character ')
+  text = text:gsub('U%+[a-fA-F0-9]+', ' unicode character ')
   
   -- Remove version numbers and semver
   text = text:gsub('v%d+%.%d+%.%d+', ' version ')
-  text = text:gsub('%d+%.%d+%.%d+', ' version ')
   text = text:gsub('[~^]%d+%.%d+%.%d+', ' version range ')
-  
-  -- Remove hashes and checksums
-  text = text:gsub('[a-fA-F0-9]{32,64}', ' hash ')
   
   -- Remove email addresses
   text = text:gsub('[%w%-%._]+@[%w%-%._]+%.%w+', ' email address ')
@@ -296,6 +331,43 @@ function M.clean_code_specific_content(text, filetype)
     text = text:gsub('package%s+[%w%.]+;', ' package ')
     text = text:gsub('mvn%s+[%w]+', ' maven command ')
   end
+  
+  return text
+end
+
+function M.remove_emoji(text)
+  -- Remove emoji and emoji-like symbols that are problematic for TTS.
+  --
+  -- NOTE: LuaJIT pattern ranges work on individual bytes, not Unicode code
+  -- points. Using \\u{} escapes inside character ranges like [\\u{1F600}-\\u{1F64F}]
+  -- creates broken ranges because multi-byte characters place the hyphen
+  -- boundary at an arbitrary byte position (e.g. \\x80-\\xF0), catching ALL
+  -- continuation bytes. We avoid this by using explicit UTF-8 byte sequences
+  -- for each emoji block instead.
+  
+  -- Emoticons / Ornamental Dingbats (U+1F600-U+1F67F)
+  text = text:gsub('\xF0\x9F[\x98-\x99][\x80-\xBF]', '')
+  -- Misc Symbols and Pictographs (U+1F300-U+1F5FF)
+  text = text:gsub('\xF0\x9F[\x8C-\x97][\x80-\xBF]', '')
+  -- Transport and Map (U+1F680-U+1F6FF)
+  text = text:gsub('\xF0\x9F[\x9A-\x9B][\x80-\xBF]', '')
+  -- Dingbats (U+2700-U+27BF) — hearts, stars, check marks, crosses, etc.
+  text = text:gsub('\xE2[\x9C-\x9E][\x80-\xBF]', '')
+  -- Misc Symbols (U+2600-U+26FF) — weather, zodiac, chess, etc.
+  text = text:gsub('\xE2[\x98-\x9B][\x80-\xBF]', '')
+  -- Regional Indicators (U+1F1E0-U+1F1FF)
+  text = text:gsub('\xF0\x9F\x87[\xA0-\xBF]', '')
+  -- Supplemental Symbols and Pictographs (U+1F900-U+1F9FF)
+  text = text:gsub('\xF0\x9F[\xA4-\xA7][\x80-\xBF]', '')
+  -- Symbols Extended-A (U+1FA70-U+1FAFF)
+  text = text:gsub('\xF0\x9F[\xA9-\xAB][\x80-\xBF]', '')
+  
+  -- Skin tone modifiers (U+1F3FB-U+1F3FF)
+  text = text:gsub('\xF0\x9F\x8F[\xBB-\xBF]', '')
+  -- Zero-width joiner (U+200D)
+  text = text:gsub('\xE2\x80\x8D', '')
+  -- Variation selector-16 (U+FE0F)
+  text = text:gsub('\xEF\xB8\x8F', '')
   
   return text
 end

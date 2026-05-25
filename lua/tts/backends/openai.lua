@@ -164,32 +164,33 @@ function M.speak(text, opts)
       end
       
       -- Play the audio file
-      M._play_audio(temp_file)
+      M._play_audio(temp_file, opts)
     end
   })
   
   return request_job
 end
 
-function M._play_audio(file)
+function M._play_audio(file, opts)
   if not file or vim.fn.filereadable(file) ~= 1 then
     return
   end
-  
+
+  opts = opts or {}
   local player = require('tts.player')
   local handle = player.play(file, {
     on_complete = function()
       vim.defer_fn(function()
         vim.fn.delete(file)
       end, 100)
-      
+
       vim.api.nvim_exec_autocmds('User', {
         pattern = 'TTSPlayEnd',
         data = { backend = 'openai' }
       })
     end
   })
-  
+
   if not handle then
     vim.fn.delete(file)
   end
