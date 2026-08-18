@@ -87,7 +87,9 @@ function M.preprocess_text(text)
   text = text:gsub('/', '')
 
   -- Final cleanup
-  text = text:gsub('%s+', ' ')  -- Normalize whitespace
+  text = text:gsub('[ \t\r]+', ' ')  -- Normalize whitespace (preserve newlines)
+  text = text:gsub(' *\n *', '\n')  -- Trim spaces around newlines
+  text = text:gsub('\n+', '\n')  -- Collapse blank lines
   text = text:gsub('^%s*[%-%*%+]%s+', '')  -- Remove leading list markers
   text = text:gsub('%.%s*[%-%*%+]%s+', '. ')  -- Clean up ". -" to ". "
   text = vim.trim(text)
@@ -417,6 +419,8 @@ function M.chunk_text(text, chunk_size)
       end
     end
     
+    chunk_end = chunk_end + vim.str_utf_end(text, chunk_end)
+    
     local chunk = text:sub(current_pos, chunk_end)
     table.insert(chunks, vim.trim(chunk))
     current_pos = chunk_end + 1
@@ -427,6 +431,58 @@ function M.chunk_text(text, chunk_size)
   end
   
   return chunks
+end
+
+local function is_speakable(piece)
+  return piece:match('[^%s%p]') ~= nil
+end
+
+function M.split_segments(text)
+  if not text or text:match('^%s*$') then
+    return {}
+  end
+
+  local playback = require('tts.config').get().playback
+  local mode = playback.segmentation or 'sentence'
+
+  if mode == 'none' then
+    return { vim.trim(text) }
+  end
+
+  local segments = {}
+  for line in text:gmatch('[^\n]+') do
+    if mode == 'line' then
+      table.insert(segments, vim.trim(line))
+    else
+      local pos = 1
+      while true do
+        local s, e = line:find('[%.!%?]["%)%]]*%s+', pos)
+        if not s then
+          break
+        end
+        table.insert(segments, vim.trim(line:sub(pos, e)))
+        pos = e + 1
+      end
+      table.insert(segments, vim.trim(line:sub(pos)))
+    end
+  end
+
+  local result = {}
+  for _, piece in ipairs(segments) do
+    if is_speakable(piece) then
+      if #piece > playback.chunk_size then
+        for _, chunk in ipairs(M.chunk_text(piece, playback.chunk_size)) do
+          if is_speakable(chunk) then
+            table.insert(result, chunk)
+          end
+        end
+      else
+        table.insert(result, piece)
+      end
+    end
+  end
+
+  return result
 end
 
 function M.notify(message, level)
@@ -463,7 +519,7 @@ function M.progress(message, percentage)
     message = string.format('%s (%.0f%%)', message, percentage)
   end
   
-  vim.g.tts_progress = message
+  vim.g.tts_progress = message or ''
   vim.cmd('redrawstatus')
 end
 

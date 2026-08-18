@@ -1,5 +1,4 @@
 local M = {}
-local config = {}
 
 M.defaults = {
 	backend = 'auto',
@@ -28,10 +27,11 @@ M.defaults = {
 		auto_clear_queue = false,
 		show_progress = true,
 		chunk_size = 500,
-		pause_between_chunks = 0.5,
+		pause_between_chunks = 0,
 		player = 'auto',
 		player_args = {},
 		default_selection = 'section',
+		segmentation = 'sentence',
 	},
 
 	cache = {
@@ -40,6 +40,7 @@ M.defaults = {
 		max_size = 100,
 		max_age = 7,
 		cleanup_on_start = true,
+		prefetch_next = true,
 	},
 
 	keymaps = {
@@ -102,9 +103,16 @@ M.defaults = {
 
 }
 
+local config = vim.deepcopy(M.defaults)
+
 function M.setup(opts)
+	local previous = config
 	config = vim.tbl_deep_extend('force', M.defaults, opts or {})
-	M.validate()
+	local ok, err = pcall(M.validate)
+	if not ok then
+		config = previous
+		error(err, 0)
+	end
 end
 
 function M.get()
@@ -126,6 +134,14 @@ function M.validate()
 
 	if config.backend ~= 'auto' and config.backend ~= 'macos' and config.backend ~= 'openai' then
 		error("backend must be 'auto', 'macos', or 'openai'")
+	end
+
+	if config.playback.segmentation ~= 'sentence' and config.playback.segmentation ~= 'line' and config.playback.segmentation ~= 'none' then
+		error("playback.segmentation must be 'sentence', 'line', or 'none'")
+	end
+
+	if config.playback.chunk_size and (type(config.playback.chunk_size) ~= 'number' or config.playback.chunk_size < 1) then
+		error("playback.chunk_size must be a positive number")
 	end
 
 	if config.openai.speed and (config.openai.speed < 0.25 or config.openai.speed > 4.0) then

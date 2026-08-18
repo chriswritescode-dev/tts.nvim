@@ -5,8 +5,8 @@ for k in pairs(package.loaded) do
   if k:find('^tts') then package.loaded[k] = nil end
 end
 
--- Add development directory to path
-package.path = "/Users/chris/development/tts.nvim/lua/?.lua;" .. package.path
+-- Add repo lua directory to path
+package.path = vim.fn.getcwd() .. "/lua/?.lua;" .. package.path
 
 -- Initialize config with defaults so clean_markdown_text works
 local config = require('tts.config')
@@ -106,4 +106,8 @@ local standalone_result = utils.remove_emoji(standalone_test)
 print("Input:    " .. standalone_test)
 print("Output:   " .. standalone_result)
 print("Expected: Hello  world  :smile:")
+
+if failed > 0 then
+  vim.cmd('cquit 1')
+end
 EOF

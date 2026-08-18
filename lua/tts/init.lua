@@ -126,12 +126,38 @@ function M._setup_keymaps()
   end
   
   if keymaps.next then
-    map('n', keymaps.next, '<cmd>TTSNext<cr>', { desc = 'TTS: Next in queue' })
+    map('n', keymaps.next, '<cmd>TTSNext<cr>', { desc = 'TTS: Next sentence/line' })
   end
   
   if keymaps.prev then
-    map('n', keymaps.prev, '<cmd>TTSPrev<cr>', { desc = 'TTS: Previous in queue' })
+    map('n', keymaps.prev, '<cmd>TTSPrev<cr>', { desc = 'TTS: Previous sentence/line' })
   end
+end
+
+function M._prepare_segments(text)
+  local utils = require('tts.utils')
+  text = utils.preprocess_text(text)
+
+  if not text or text == '' then
+    vim.notify('Text became empty after preprocessing', vim.log.levels.WARN)
+    return nil
+  end
+
+  local hooks = require('tts.config').get().hooks
+  if hooks and hooks.before_play then
+    local modified = hooks.before_play(text)
+    if modified then
+      text = modified
+    end
+  end
+
+  local segments = utils.split_segments(text)
+  if #segments == 0 then
+    vim.notify('Text became empty after preprocessing', vim.log.levels.WARN)
+    return nil
+  end
+
+  return segments
 end
 
 function M.play(text, opts)
@@ -141,33 +167,13 @@ function M.play(text, opts)
     return
   end
 
-  local utils = require('tts.utils')
-  local config = require('tts.config').get()
-
   local original_text = text
-  text = utils.preprocess_text(original_text)
-
-  if not text or text == '' then
-    vim.notify('Text became empty after preprocessing', vim.log.levels.WARN)
+  local segments = M._prepare_segments(text)
+  if not segments then
     return
   end
 
-  local hooks = config.hooks
-  if hooks and hooks.before_play then
-    local modified = hooks.before_play(text)
-    if modified then
-      text = modified
-    end
-  end
-
-  local backends = require('tts.backends')
-  backends.speak(text, opts)
-
-  if hooks and hooks.after_play then
-    vim.defer_fn(function()
-      hooks.after_play(original_text)
-    end, 100)
-  end
+  require('tts.queue').set_segments(segments, { opts = opts, original_text = original_text })
 end
 
 function M.play_range(line1, line2)
@@ -222,8 +228,7 @@ function M.play_motion(motion)
 end
 
 function M.stop()
-  local backends = require('tts.backends')
-  backends.stop()
+  require('tts.queue').stop()
 end
 
 function M.queue_add(text)
@@ -239,8 +244,10 @@ function M.queue_add(text)
   end
   
   if text and text ~= '' then
-    local queue = require('tts.queue')
-    queue.add(text)
+    local segments = M._prepare_segments(text)
+    if segments then
+      require('tts.queue').append(segments, { original_text = text })
+    end
     -- Silent add - no notification needed
   end
 end

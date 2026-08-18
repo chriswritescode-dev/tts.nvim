@@ -1,0 +1,158 @@
+" Test segment splitting and line-preserving preprocessing
+lua << EOF
+-- Clear any cached tts modules so source changes take effect
+for k in pairs(package.loaded) do
+  if k:find('^tts') then package.loaded[k] = nil end
+end
+
+-- Add repo lua directory to path
+package.path = vim.fn.getcwd() .. "/lua/?.lua;" .. package.path
+
+-- Initialize config with defaults
+require('tts.config').setup({})
+
+local utils = require('tts.utils')
+local config = require('tts.config')
+
+local function reset()
+  require('tts.config').setup({})
+end
+
+local function set_segmentation(mode)
+  require('tts.config').setup({ playback = { segmentation = mode } })
+end
+
+local function same_list(a, b)
+  if #a ~= #b then return false end
+  for i = 1, #a do
+    if a[i] ~= b[i] then return false end
+  end
+  return true
+end
+
+local function fmt(list)
+  return table.concat(list, ' | ')
+end
+
+local passed = 0
+local failed = 0
+
+local function check(name, ok, detail)
+  if ok then
+    passed = passed + 1
+    print(string.format("PASS: %s", name))
+  else
+    failed = failed + 1
+    print(string.format("FAIL: %s -- %s", name, detail or ''))
+  end
+end
+
+print("Testing split_segments and line-preserving preprocessing")
+print("=" .. string.rep("=", 60))
+
+reset()
+check("sentence: One. Two! Three?",
+  same_list(utils.split_segments("One. Two! Three?"), { "One.", "Two!", "Three?" }),
+  fmt(utils.split_segments("One. Two! Three?")))
+
+reset()
+check("decimals not split",
+  same_list(utils.split_segments("The value 2.0 is bigger than 1.5 here."), { "The value 2.0 is bigger than 1.5 here." }),
+  fmt(utils.split_segments("The value 2.0 is bigger than 1.5 here.")))
+
+reset()
+check("ellipsis kept",
+  same_list(utils.split_segments("Wait... then continue. Done."), { "Wait...", "then continue.", "Done." }),
+  fmt(utils.split_segments("Wait... then continue. Done.")))
+
+reset()
+check("sentence mode: one segment per line",
+  same_list(utils.split_segments("Line one\nLine two"), { "Line one", "Line two" }),
+  fmt(utils.split_segments("Line one\nLine two")))
+
+reset()
+check("non-Latin script segments kept",
+  same_list(utils.split_segments("Привет мир. Как дела?"), { "Привет мир.", "Как дела?" }),
+  fmt(utils.split_segments("Привет мир. Как дела?")))
+
+set_segmentation('line')
+check("line mode ignores sentence punctuation",
+  same_list(utils.split_segments("First. Second here.\nThird one."), { "First. Second here.", "Third one." }),
+  fmt(utils.split_segments("First. Second here.\nThird one.")))
+
+set_segmentation('none')
+check("none mode returns one segment",
+  same_list(utils.split_segments("First line here.\nSecond line there?"), { "First line here.\nSecond line there?" }),
+  fmt(utils.split_segments("First line here.\nSecond line there?")))
+
+reset()
+check("punctuation-only piece dropped",
+  same_list(utils.split_segments("Done! ... More text here."), { "Done!", "More text here." }),
+  fmt(utils.split_segments("Done! ... More text here.")))
+
+reset()
+do
+  local long_line = string.rep("word ", 100) .. "end."
+  local segs = utils.split_segments(long_line)
+  check("over-long line split by chunk_size",
+    #segs >= 2 and #segs[1] <= 500 and #segs[#segs] <= 500,
+    "#segs=" .. tostring(#segs) .. " len1=" .. tostring(#segs[1]))
+end
+
+reset()
+do
+  local cjk = string.rep("这是一个没有空格的长句子", 80)
+  local segs = utils.split_segments(cjk)
+  local all_ok = #segs > 1
+  for _, seg in ipairs(segs) do
+    local first = seg:byte(1)
+    if #seg % 3 ~= 0 or first < 0xE0 or first > 0xEF then
+      all_ok = false
+      break
+    end
+  end
+  local lens = {}
+  for _, seg in ipairs(segs) do
+    lens[#lens + 1] = tostring(#seg)
+  end
+  check("CJK over-long split on char boundaries",
+    all_ok and table.concat(segs) == cjk,
+    "#segs=" .. tostring(#segs) .. " lens=" .. table.concat(lens, ",")
+      .. " rejoined=" .. tostring(table.concat(segs) == cjk))
+end
+
+reset()
+check("empty input returns {}", #utils.split_segments("") == 0)
+check("whitespace-only input returns {}", #utils.split_segments("   ") == 0)
+check("nil input returns {}", #utils.split_segments(nil) == 0)
+
+do
+  local out = utils.preprocess_text("# Title\n\nLine one\nLine two.")
+  check("preprocess_text keeps newline separators", out:find("\n", 1, true) ~= nil,
+    out)
+  check("preprocess_text collapses space runs", not out:find("  ", 1, true),
+    out)
+end
+
+do
+  local ok, err = pcall(require('tts.config').setup, { playback = { segmentation = 'paragraph' } })
+  check("invalid segmentation rejected by config.setup", not ok,
+    ok and "no error raised" or err)
+end
+
+do
+  local ok, err = pcall(require('tts.config').setup, { playback = { chunk_size = 0 } })
+  check("chunk_size 0 rejected by config.setup", not ok,
+    ok and "no error raised" or err)
+  check("rejected setup rolls back chunk_size",
+    require('tts.config').get().playback.chunk_size == 500,
+    tostring(require('tts.config').get().playback.chunk_size))
+end
+
+print("=" .. string.rep("=", 60))
+print(string.format("Results: %d passed, %d failed", passed, failed))
+
+if failed > 0 then
+  vim.cmd('cquit 1')
+end
+EOF

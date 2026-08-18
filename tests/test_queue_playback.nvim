@@ -1,0 +1,336 @@
+" Test queue-owned segment playback
+lua << EOF
+for k in pairs(package.loaded) do
+  if k:find('^tts') then package.loaded[k] = nil end
+end
+
+package.path = vim.fn.getcwd() .. "/lua/?.lua;" .. vim.fn.getcwd() .. "/lua/?/init.lua;" .. package.path
+
+require('tts.config').setup({})
+
+local queue = require('tts.queue')
+local backends = require('tts.backends')
+
+local spoken = {}
+local captured = {}
+local stop_count = 0
+local last_stop_opts = nil
+
+backends.speak = function(text, opts)
+  table.insert(spoken, text)
+  table.insert(captured, opts.on_complete)
+  return { stop = function() end }
+end
+
+backends.stop = function(opts)
+  stop_count = stop_count + 1
+  last_stop_opts = opts
+end
+
+local prefetched = {}
+backends.prefetch = function(text, opts)
+  table.insert(prefetched, text)
+end
+
+local passed = 0
+local failed = 0
+
+local function check(name, ok, detail)
+  if ok then
+    passed = passed + 1
+    print(string.format("PASS: %s", name))
+  else
+    failed = failed + 1
+    print(string.format("FAIL: %s -- %s", name, detail or ''))
+  end
+end
+
+local function spoken_texts()
+  return table.concat(spoken, ' | ')
+end
+
+print("Testing queue-owned segment playback")
+print("=" .. string.rep("=", 60))
+
+-- The assertion body is pcall-wrapped so a Lua error inside the module under
+-- test surfaces as a failure (cquit 1) instead of aborting with exit 0.
+local body_ok, body_err = pcall(function()
+
+-- Natural advance: a three-segment run plays 1 -> 2 -> 3 driven purely by
+-- completion callbacks, without ever calling backends.stop
+queue.set_segments({ "One.", "Two.", "Three." })
+check("set_segments speaks segment 1", #spoken == 1 and spoken[1] == "One.", spoken_texts())
+local cur = queue.get_current()
+check("get_current is segment 1", cur and cur.text == "One.", cur and cur.text or "nil")
+check("is_active true while playing", queue.is_active() == true)
+
+captured[1]()
+check("completing segment 1 speaks segment 2", #spoken == 2 and spoken[2] == "Two.", spoken_texts())
+check("current is segment 2",
+  queue.get_current() and queue.get_current().text == "Two.",
+  queue.get_current() and queue.get_current().text or "nil")
+
+captured[2]()
+check("completing segment 2 speaks segment 3", #spoken == 3 and spoken[3] == "Three.", spoken_texts())
+
+captured[3]()
+check("completing last segment leaves is_active false", queue.is_active() == false)
+check("completing last segment does not speak again", #spoken == 3, spoken_texts())
+check("natural advance never calls backends.stop", stop_count == 0, "stop_count=" .. stop_count)
+
+-- A stale completion callback from a superseded segment is a no-op.
+-- Run A, skip to B, then fire A's callback: it must neither speak again nor
+-- advance. Without the token guard it would phantom-advance the run to C,
+-- skipping a segment.
+queue.set_segments({ "A.", "B.", "C.", "D." })
+local cb_a = captured[#captured]
+
+local stops_before = stop_count
+local before = #spoken
+queue.skip()
+check("skip speaks segment B",
+  #spoken == before + 1 and spoken[#spoken] == "B.", spoken_texts())
+check("skip halts the active segment", stop_count == stops_before + 1, "stop_count=" .. stop_count)
+
+before = #spoken
+cb_a()
+check("stale callback speaks nothing", #spoken == before, spoken_texts())
+check("stale callback does not move current",
+  queue.get_current() and queue.get_current().text == "B.",
+  queue.get_current() and queue.get_current().text or "nil")
+check("stale callback leaves run active", queue.is_active() == true)
+
+-- Superseding the playing segment with play_index also invalidates its
+-- callback, even when the new index is not the last item.
+local cb_b = captured[#captured]
+stops_before = stop_count
+before = #spoken
+queue.play_index(2)
+check("play_index(2) speaks segment 2",
+  #spoken == before + 1 and spoken[#spoken] == "B.", spoken_texts())
+check("play_index(2) halts the active segment", stop_count == stops_before + 1, "stop_count=" .. stop_count)
+
+before = #spoken
+cb_b()
+check("superseded callback speaks nothing", #spoken == before, spoken_texts())
+check("superseded callback does not move current",
+  queue.get_current() and queue.get_current().text == "B.",
+  queue.get_current() and queue.get_current().text or "nil")
+check("superseded callback leaves run active", queue.is_active() == true)
+
+-- backends.stop() no longer touches queue state
+backends.stop()
+check("backends.stop leaves current segment",
+  queue.get_current() and queue.get_current().text == "B.",
+  queue.get_current() and queue.get_current().text or "nil")
+check("backends.stop leaves is_active", queue.is_active() == true)
+
+before = #spoken
+captured[#captured]()
+check("current segment still completes after backends.stop",
+  queue.is_active() == true and spoken[#spoken] == "C.", spoken_texts())
+captured[#captured]()
+check("completing C advances to D",
+  queue.get_current() and queue.get_current().text == "D.",
+  queue.get_current() and queue.get_current().text or "nil")
+
+-- play_index beyond the last item finishes the run
+queue.play_index(99)
+check("play_index beyond end leaves is_active false", queue.is_active() == false)
+check("play_index beyond end keeps items", queue.size() == 4)
+
+-- append starts playback when the queue is idle
+local before_append = #spoken
+queue.append({ "Four." })
+check("append speaks when idle",
+  #spoken == before_append + 1 and spoken[#spoken] == "Four.", spoken_texts())
+check("append starts playback", queue.is_active() == true)
+
+-- skip on the last segment ends the run; previous replays
+local before_skip = #spoken
+queue.skip()
+check("skip on last segment ends the run", queue.is_active() == false)
+check("skip on last segment speaks nothing", #spoken == before_skip, spoken_texts())
+queue.previous()
+check("previous replays segment 4",
+  queue.get_current() and queue.get_current().text == "D.",
+  queue.get_current() and queue.get_current().text or "nil")
+check("previous is active again", queue.is_active() == true)
+queue.previous()
+check("previous at index 3 goes to segment 3",
+  queue.get_current() and queue.get_current().text == "C.",
+  queue.get_current() and queue.get_current().text or "nil")
+queue.skip()
+check("skip during playback advances one segment",
+  queue.get_current() and queue.get_current().text == "D.",
+  queue.get_current() and queue.get_current().text or "nil")
+
+-- previous at index 1 replays segment 1 and keeps current_index at 1
+queue.previous()
+queue.previous()
+queue.previous()
+check("previous walks back to segment 1",
+  queue.get_current() and queue.get_current().text == "A.",
+  queue.get_current() and queue.get_current().text or "nil")
+
+before = #spoken
+queue.previous()
+check("previous at index 1 replays segment 1",
+  #spoken == before + 1 and spoken[#spoken] == "A.", spoken_texts())
+check("previous at index 1 keeps current at 1",
+  queue.get_current() and queue.get_current().text == "A.",
+  queue.get_current() and queue.get_current().text or "nil")
+check("previous at index 1 leaves run active", queue.is_active() == true)
+
+-- clear resets the module state
+queue.clear()
+check("clear empties the queue", queue.size() == 0)
+check("clear leaves is_active false", queue.is_active() == false)
+check("clear leaves no current segment", queue.get_current() == nil)
+
+-- empty segments do not start playback
+local before_empty = #spoken
+queue.set_segments({})
+check("empty segments speak nothing", #spoken == before_empty, spoken_texts())
+check("empty segments leave is_active false", queue.is_active() == false)
+check("empty segments leave no current segment", queue.get_current() == nil)
+
+-- stop halts the run, preserves position, and never auto-advances
+queue.set_segments({ "One.", "Two.", "Three." })
+captured[#captured]()
+check("stop block starts at segment 2",
+  queue.get_current() and queue.get_current().text == "Two.",
+  queue.get_current() and queue.get_current().text or "nil")
+
+local cb_stop = captured[#captured]
+local stops_before = stop_count
+local before_stop = #spoken
+require('tts').stop()
+check("stop calls backends.stop once", stop_count == stops_before + 1, "stop_count=" .. stop_count)
+check("user stop passes no options to the backend", last_stop_opts == nil, vim.inspect(last_stop_opts))
+check("stop speaks nothing", #spoken == before_stop, spoken_texts())
+check("stop leaves is_active false", queue.is_active() == false)
+check("stop preserves current segment",
+  queue.get_current() and queue.get_current().text == "Two.",
+  queue.get_current() and queue.get_current().text or "nil")
+
+before_stop = #spoken
+cb_stop()
+check("stale stopped callback speaks nothing", #spoken == before_stop, spoken_texts())
+check("stale stopped callback does not advance",
+  queue.get_current() and queue.get_current().text == "Two.",
+  queue.get_current() and queue.get_current().text or "nil")
+check("stale stopped callback leaves run stopped", queue.is_active() == false)
+
+queue.skip()
+check("skip after stop plays segment 3",
+  #spoken == before_stop + 1 and spoken[#spoken] == "Three.", spoken_texts())
+check("skip after stop resumes playback", queue.is_active() == true)
+
+-- clear mid-run silences the backend and invalidates the in-flight callback
+queue.set_segments({ "One.", "Two.", "Three." })
+local cb_clear = captured[#captured]
+local stops_before_clear = stop_count
+local before_clear = #spoken
+queue.clear()
+check("clear mid-run silences the backend", stop_count == stops_before_clear + 1, "stop_count=" .. stop_count)
+check("clear mid-run empties the queue", queue.size() == 0)
+check("clear mid-run leaves is_active false", queue.is_active() == false)
+check("clear mid-run leaves no current segment", queue.get_current() == nil)
+cb_clear()
+check("stale cleared callback speaks nothing", #spoken == before_clear, spoken_texts())
+check("stale cleared callback leaves the queue empty", queue.size() == 0)
+
+-- a user stop silences a stray backend even when the queue believes nothing is active
+local stops_before_idle = stop_count
+local before_idle = #spoken
+require('tts').stop()
+check("stop while idle still calls backends.stop once", stop_count == stops_before_idle + 1, "stop_count=" .. stop_count)
+check("stop while idle speaks nothing", #spoken == before_idle, spoken_texts())
+check("stop while idle stays inactive", queue.is_active() == false)
+
+-- play_index warms the following segment through the backend's prefetch
+local p_start = #prefetched
+queue.set_segments({ "P1.", "P2.", "P3." })
+check("play_index(1) prefetches segment 2",
+  #prefetched == p_start + 1 and prefetched[#prefetched] == "P2.",
+  table.concat(prefetched, ' | '))
+queue.skip()
+check("skip to segment 2 prefetches segment 3",
+  #prefetched == p_start + 2 and prefetched[#prefetched] == "P3.",
+  table.concat(prefetched, ' | '))
+check("skip passes keep_prefetch to the backend",
+  last_stop_opts and last_stop_opts.keep_prefetch == true,
+  vim.inspect(last_stop_opts))
+queue.skip()
+check("last segment prefetches nothing", #prefetched == p_start + 2, table.concat(prefetched, ' | '))
+
+-- Phase 12: pause_between_chunks applies only to natural advance
+local deferred = {}
+local original_defer_fn = vim.defer_fn
+vim.defer_fn = function(fn, ms)
+  table.insert(deferred, { fn = fn, ms = ms })
+end
+
+-- default config (pause_between_chunks = 0): completion advances inline
+local before_nat = #spoken
+queue.set_segments({ "N1.", "N2." })
+captured[#captured]()
+check("default pause advances inline to segment 2",
+  #spoken == before_nat + 2 and spoken[#spoken] == "N2.", spoken_texts())
+check("default pause schedules no defer", #deferred == 0, "deferred=" .. #deferred)
+
+-- a configured pause defers the natural advance and only runs when the
+-- captured function executes
+require('tts.config').get().playback.pause_between_chunks = 0.25
+queue.set_segments({ "A2.", "B2.", "C2.", "D2." })
+check("pause 0.25 speaks segment 1 immediately",
+  #spoken == before_nat + 3 and spoken[#spoken] == "A2.", spoken_texts())
+
+captured[#captured]()
+check("pause 0.25 schedules a 250 ms defer",
+  #deferred == 1 and deferred[1].ms == 250, vim.inspect(deferred))
+check("pause 0.25 does not advance before the defer runs",
+  queue.get_current() and queue.get_current().text == "A2.",
+  queue.get_current() and queue.get_current().text or "nil")
+check("pause 0.25 leaves the run inactive during the pause", queue.is_active() == false)
+
+deferred[1].fn()
+check("running the deferred fn advances to segment 2",
+  #spoken == before_nat + 4 and spoken[#spoken] == "B2.", spoken_texts())
+check("running the deferred fn reactivates the run", queue.is_active() == true)
+
+-- a manual skip during the pause cancels the pending advance
+captured[#captured]()
+check("pause 0.25 schedules a defer for the next advance too", #deferred == 2,
+  "deferred=" .. #deferred)
+local spoken_during = #spoken
+queue.skip()
+check("skip during the pause speaks segment 3 immediately",
+  #spoken == spoken_during + 1 and spoken[#spoken] == "C2.", spoken_texts())
+check("skip during the pause moves current to segment 3",
+  queue.get_current() and queue.get_current().text == "C2.",
+  queue.get_current() and queue.get_current().text or "nil")
+
+deferred[2].fn()
+check("stale deferred advance speaks nothing", #spoken == spoken_during + 1, spoken_texts())
+check("stale deferred advance leaves current at segment 3",
+  queue.get_current() and queue.get_current().text == "C2.",
+  queue.get_current() and queue.get_current().text or "nil")
+
+vim.defer_fn = original_defer_fn
+
+end)
+
+if not body_ok then
+  failed = failed + 1
+  print(string.format("FAIL: queue playback test body errored -- %s", tostring(body_err)))
+end
+
+print("=" .. string.rep("=", 60))
+print(string.format("Results: %d passed, %d failed", passed, failed))
+
+if failed > 0 then
+  vim.cmd('cquit 1')
+end
+EOF
