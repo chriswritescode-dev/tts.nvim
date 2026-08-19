@@ -162,6 +162,22 @@ check("whitespace-only input returns {}", #utils.split_segments("   ") == 0)
 check("nil input returns {}", #utils.split_segments(nil) == 0)
 
 do
+  require('tts.config').setup({
+    playback = { segmentation = 'line', lines_per_segment = 1 },
+    preprocessing = { add_line_breaks = true },
+  })
+  local raw = "Alpha line\nBravo line\nCharlie line"
+  local processed = utils.preprocess_text(raw)
+  check("add_line_breaks adds periods without joining lines",
+    processed == "Alpha line.\nBravo line.\nCharlie line",
+    (processed:gsub('\n', ' / ')))
+  check("add_line_breaks keeps one segment per line",
+    same_list(utils.split_segments(processed), { "Alpha line.", "Bravo line.", "Charlie line" }),
+    fmt(utils.split_segments(processed)))
+  reset()
+end
+
+do
   local out = utils.preprocess_text("# Title\n\nLine one\nLine two.")
   check("preprocess_text keeps newline separators", out:find("\n", 1, true) ~= nil,
     out)

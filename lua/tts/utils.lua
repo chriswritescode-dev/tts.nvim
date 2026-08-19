@@ -79,7 +79,7 @@ function M.preprocess_text(text)
   -- Add periods at end of lines for natural pauses (before normalizing whitespace)
   if preprocessing.add_line_breaks then
     -- Add period at end of lines that don't already end with punctuation
-    text = text:gsub('([^%.!?:,;])%s*\n', '%1. ')
+    text = text:gsub('([^%.!?:,;])[ \t]*\n', '%1.\n')
   end
   
   -- Strip problematic characters that TTS engines struggle with
@@ -508,6 +508,66 @@ function M.split_segments(text)
   return result
 end
 
+function M.group_source_lines(lines, start_line)
+  local config = require('tts.config').get()
+  local playback = config.playback
+  local mode = playback.segmentation or 'sentence'
+
+  local group_size
+  if mode == 'line' then
+    group_size = math.max(1, math.floor(tonumber(playback.lines_per_segment) or 1))
+  elseif mode == 'none' then
+    group_size = math.huge
+  else
+    group_size = 1
+  end
+
+  local skip_code = config.preprocessing and config.preprocessing.skip_code_blocks
+  local groups = {}
+  local group, first, last = {}, nil, nil
+  local in_fence = false
+
+  local function flush()
+    if #group > 0 then
+      table.insert(groups, {
+        text = table.concat(group, '\n'),
+        first = first,
+        last = last,
+      })
+    end
+    group, first, last = {}, nil, nil
+  end
+
+  for i, line in ipairs(lines) do
+    local buf_line = start_line + i - 1
+    local skip = false
+
+    if skip_code then
+      if line:match('^%s*```') or line:match('^%s*~~~') then
+        in_fence = not in_fence
+        skip = true
+      elseif in_fence then
+        skip = true
+      end
+    end
+
+    if not skip and is_speakable(line) then
+      if not first then
+        first = buf_line
+      end
+      last = buf_line
+      table.insert(group, line)
+      if #group >= group_size then
+        flush()
+      end
+    end
+  end
+
+  flush()
+
+  return groups
+end
+
 function M.notify(message, level)
   level = level or vim.log.levels.INFO
   local config = require('tts.config').get().notifications
@@ -529,6 +589,10 @@ function M.notify(message, level)
   end
   
   vim.notify('[TTS] ' .. message, level)
+end
+
+function M.echo_lines(lines)
+  vim.api.nvim_echo({ { table.concat(lines, '\n') } }, true, {})
 end
 
 function M.progress(message, percentage)

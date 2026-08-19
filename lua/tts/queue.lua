@@ -21,8 +21,17 @@ end
 
 local function push_items(segments, opts)
   for _, seg in ipairs(segments) do
+    local text = seg
+    local range = nil
+
+    if type(seg) == 'table' then
+      text = seg.text
+      range = seg.range
+    end
+
     table.insert(items, {
-      text = seg,
+      text = text,
+      range = range,
       opts = opts or {},
       status = 'pending',
       id = vim.fn.localtime() .. '_' .. math.random(1000)
@@ -34,6 +43,7 @@ function M.stop()
   invalidate()
   active = false
   require('tts.utils').progress(nil)
+  require('tts.follow').clear()
   require('tts.backends').stop()
 
   vim.api.nvim_exec_autocmds('User', {
@@ -123,6 +133,8 @@ function M.play_index(index)
   finished = false
   local token = play_token
 
+  require('tts.follow').show(item.range)
+
   local config = require('tts.config').get()
   local hooks = config.hooks
   if hooks and hooks.on_queue_item then
@@ -187,6 +199,7 @@ function M._finish()
   finished = true
   active = false
   require('tts.utils').progress(nil)
+  require('tts.follow').clear()
 
   local config = require('tts.config').get()
   local hooks = config.hooks

@@ -19,10 +19,11 @@ require('tts').setup({
 ## Features
 
 - **Multi-backend Support**: Native macOS `say` command and OpenAI API
-- **Smart Text Selection**: Visual mode, line/paragraph, and motion-based selection
+- **Smart Text Selection**: Visual mode, line/paragraph/section/buffer, and motion-based selection
 - **Intelligent Content Filtering**: Removes paths, URLs, and technical content for better TTS
 - **Playback Control**: Play and stop with basic state management
 - **Segment Playback**: A selection is split into segments and played in order, with next/prev navigation between them. In `line` mode a segment is a group of `lines_per_segment` lines (5 by default), so next/prev jumps a whole group rather than a single line
+- **Segment Following**: When playing from a buffer, the cursor jumps to the current segment and its lines are highlighted with the `TTSSegment` group (linked to `Visual` by default). Disable with `playback.follow = false`
 - **Audio Caching**: The OpenAI-compatible backend caches each segment's audio (keyed by text, endpoint, model, voice, speed and format), so replaying a segment costs no HTTP request
 - **Text Preprocessing**: Clean code comments, expand abbreviations, language-specific replacements
 
@@ -77,7 +78,8 @@ Using [lazy.nvim](https://github.com/folke/lazy.nvim):
         pause_between_chunks = 0,            -- Delay between segments on natural advance only (seconds)
         player = 'auto',                     -- Audio player: 'auto', 'mpv', 'ffplay', etc.
         player_args = {},                    -- Custom player arguments
-        default_selection = 'section',       -- Default text selection: 'line', 'paragraph', 'section'
+        default_selection = 'buffer',       -- Default text selection: 'line', 'paragraph', 'section', 'buffer'
+        follow = true,                       -- Move the cursor to the playing segment and highlight its lines
       },
 
       -- Cache settings
@@ -228,7 +230,7 @@ require('tts').setup({
 ### Commands
 
 - `:TTS [text]` - Speak the provided text or current selection
-- `:TTSPlay` - Play current selection/line/paragraph
+- `:TTSPlay` - Play current selection, or the whole file when nothing is selected
 - `:TTSStop` - Stop current playback
 
 - `:TTSQueue [text]` - Append extra text to the current run, or show the queue when called without text
@@ -243,7 +245,7 @@ require('tts').setup({
 
 ### Default Keymaps
 
-- `<leader>tp` - Play selection/current text
+- `<leader>tp` - Play selection, or the whole file when nothing is selected
 - `<leader>ts` - Stop playback
 
 - `<leader>tq` - Add to queue / show queue

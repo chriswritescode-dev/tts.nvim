@@ -1,0 +1,129 @@
+" Test segment following: line provenance, cursor jump, and highlight
+lua << EOF
+for k in pairs(package.loaded) do
+  if k:find('^tts') then package.loaded[k] = nil end
+end
+
+package.path = vim.fn.getcwd() .. "/lua/?.lua;" .. vim.fn.getcwd() .. "/lua/?/init.lua;" .. package.path
+
+local tts = require('tts')
+local backends = require('tts.backends')
+local queue = require('tts.queue')
+
+tts.setup({
+  playback = { segmentation = 'line', lines_per_segment = 2 },
+  keymaps = {},
+  cache = { enabled = false },
+})
+
+local pending = nil
+backends.speak = function(text, opts)
+  pending = opts.on_complete
+  return { stop = function() end }
+end
+backends.stop = function() end
+backends.prefetch = function() end
+
+local passed = 0
+local failed = 0
+
+local function check(name, ok, detail)
+  if ok then
+    passed = passed + 1
+    print(string.format("PASS: %s", name))
+  else
+    failed = failed + 1
+    print(string.format("FAIL: %s -- %s", name, detail or ''))
+  end
+end
+
+local function cursor_line()
+  return vim.api.nvim_win_get_cursor(0)[1]
+end
+
+local function marks()
+  local ns = vim.api.nvim_create_namespace('tts_segment')
+  return vim.api.nvim_buf_get_extmarks(0, ns, 0, -1, { details = true })
+end
+
+print("Testing segment following")
+print("=" .. string.rep("=", 60))
+
+vim.api.nvim_buf_set_lines(0, 0, -1, false, {
+  'Line one alpha.',
+  'Line two bravo.',
+  'Line three charlie.',
+  'Line four delta.',
+  'Line five echo.',
+  'Line six foxtrot.',
+})
+
+local body_ok, body_err = pcall(function()
+
+vim.api.nvim_win_set_cursor(0, { 4, 0 })
+tts.play_selection()
+
+check("buffer play groups two source lines per segment", queue.size() == 3, "size=" .. queue.size())
+
+local first_item = queue.get_current()
+check("first segment carries its source range",
+  first_item and first_item.range and first_item.range.first == 1 and first_item.range.last == 2,
+  first_item and first_item.range and (first_item.range.first .. '-' .. first_item.range.last) or 'nil')
+
+check("cursor jumps to the first segment", cursor_line() == 1, tostring(cursor_line()))
+
+local m = marks()
+check("first segment is highlighted", #m == 1, "#marks=" .. #m)
+check("highlight starts on the segment's first line",
+  m[1] and m[1][2] == 0, m[1] and tostring(m[1][2]) or 'nil')
+check("highlight ends on the segment's last line",
+  m[1] and m[1][4] and m[1][4].end_row == 1, m[1] and m[1][4] and tostring(m[1][4].end_row) or 'nil')
+
+queue.skip()
+check("skip moves to the second segment range",
+  queue.get_current().range.first == 3 and queue.get_current().range.last == 4,
+  queue.get_current().range.first .. '-' .. queue.get_current().range.last)
+check("cursor follows the skip", cursor_line() == 3, tostring(cursor_line()))
+
+queue.previous()
+check("previous moves the cursor back", cursor_line() == 1, tostring(cursor_line()))
+
+queue.skip(2)
+check("counted skip lands on the third segment", cursor_line() == 5, tostring(cursor_line()))
+
+queue.stop()
+check("stop clears the highlight", #marks() == 0, "#marks=" .. #marks())
+
+-- raw text playback has no buffer origin, so nothing is highlighted
+queue.clear()
+vim.api.nvim_win_set_cursor(0, { 2, 0 })
+tts.play("Some text that came from outside the buffer.")
+check("raw text playback leaves the cursor alone", cursor_line() == 2, tostring(cursor_line()))
+check("raw text playback highlights nothing", #marks() == 0, "#marks=" .. #marks())
+
+-- following can be turned off
+queue.clear()
+require('tts.config').setup({
+  playback = { segmentation = 'line', lines_per_segment = 2, follow = false },
+  keymaps = {},
+  cache = { enabled = false },
+})
+vim.api.nvim_win_set_cursor(0, { 6, 0 })
+tts.play_lines(1, 6)
+check("follow=false keeps the cursor put", cursor_line() == 6, tostring(cursor_line()))
+check("follow=false highlights nothing", #marks() == 0, "#marks=" .. #marks())
+
+end)
+
+if not body_ok then
+  failed = failed + 1
+  print(string.format("FAIL: follow test body errored -- %s", tostring(body_err)))
+end
+
+print("=" .. string.rep("=", 60))
+print(string.format("Results: %d passed, %d failed", passed, failed))
+
+if failed > 0 then
+  vim.cmd('cquit 1')
+end
+EOF
