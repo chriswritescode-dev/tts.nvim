@@ -6,6 +6,7 @@ M.voices = {
 }
 
 local current_job = nil
+local job_token = 0
 
 function M.is_available()
   return vim.fn.has('mac') == 1 and vim.fn.executable('say') == 1
@@ -52,6 +53,9 @@ function M._execute_async(cmd, opts)
   local stdout = vim.loop.new_pipe(false)
   local stderr = vim.loop.new_pipe(false)
 
+  job_token = job_token + 1
+  local token = job_token
+
   current_job = vim.loop.spawn('sh', {
     args = { '-c', cmd },
     stdio = { nil, stdout, stderr }
@@ -61,6 +65,9 @@ function M._execute_async(cmd, opts)
     end
     if stderr then
       stderr:close()
+    end
+    if token ~= job_token then
+      return
     end
     if current_job then
       current_job:close()

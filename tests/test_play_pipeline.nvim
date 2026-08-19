@@ -9,6 +9,7 @@ package.path = vim.fn.getcwd() .. "/lua/?.lua;" .. vim.fn.getcwd() .. "/lua/?/in
 local after_play_calls = {}
 
 require('tts.config').setup({
+  playback = { segmentation = 'sentence' },
   hooks = {
     before_play = function(text)
       return text:gsub('MARK', 'marker')
@@ -220,6 +221,47 @@ tts.play("Stop one. Stop two.")
 check("progress shows 1/2 after play", vim.g.tts_progress == '1/2', tostring(vim.g.tts_progress))
 tts.stop()
 check("progress is cleared on stop", vim.g.tts_progress == '', tostring(vim.g.tts_progress))
+
+-- line segmentation: one segment per line, so count jumps map to lines
+require('tts.config').setup({ playback = { segmentation = 'line' } })
+queue.clear()
+tts.play("Line A.\nLine B.\nLine C.")
+check("line mode creates one segment per line", queue.size() == 3, "size=" .. queue.size())
+check("line mode keeps the full line as a segment",
+  queue.get_current() and queue.get_current().text == "Line A.",
+  queue.get_current() and queue.get_current().text or "nil")
+check("progress shows 1/3 in line mode", vim.g.tts_progress == '1/3', tostring(vim.g.tts_progress))
+
+queue.skip(2)
+check("skip(2) jumps two segments forward",
+  queue.get_current() and queue.get_current().text == "Line C.",
+  queue.get_current() and queue.get_current().text or "nil")
+check("progress shows 3/3 after skip(2)", vim.g.tts_progress == '3/3', tostring(vim.g.tts_progress))
+
+queue.previous(1)
+check("previous(1) goes back one segment",
+  queue.get_current() and queue.get_current().text == "Line B.",
+  queue.get_current() and queue.get_current().text or "nil")
+
+queue.previous(5)
+check("previous(5) clamps to the first segment",
+  queue.get_current() and queue.get_current().text == "Line A.",
+  queue.get_current() and queue.get_current().text or "nil")
+
+queue.skip(9)
+check("skip past the end finishes the run", queue.is_active() == false, "active=" .. tostring(queue.is_active()))
+check("skip past the end clears progress", vim.g.tts_progress == '', tostring(vim.g.tts_progress))
+
+queue.clear()
+tts.play("A.\nB.\nC.")
+queue.skip()
+check("skip() with no count moves one segment",
+  queue.get_current() and queue.get_current().text == "B.",
+  queue.get_current() and queue.get_current().text or "nil")
+queue.skip(0)
+check("skip(0) behaves like a single skip",
+  queue.get_current() and queue.get_current().text == "C.",
+  queue.get_current() and queue.get_current().text or "nil")
 
 end)
 

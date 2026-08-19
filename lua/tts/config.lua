@@ -31,7 +31,7 @@ M.defaults = {
 		player = 'auto',
 		player_args = {},
 		default_selection = 'section',
-		segmentation = 'sentence',
+		segmentation = 'line',
 	},
 
 	cache = {

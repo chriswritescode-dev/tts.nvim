@@ -244,23 +244,25 @@ function M.is_active()
   return active
 end
 
-function M.skip()
+function M.skip(count)
   if #items == 0 then
     return
   end
-  if current_index >= #items then
+  count = math.max(1, count or 1)
+  if current_index + count > #items then
     halt()
     M._finish()
     return
   end
-  M.play_index(current_index + 1)
+  M.play_index(current_index + count)
 end
 
-function M.previous()
+function M.previous(count)
   if #items == 0 then
     return
   end
-  M.play_index(math.max(1, current_index - 1))
+  count = math.max(1, count or 1)
+  M.play_index(math.max(1, current_index - count))
 end
 
 function M.size()

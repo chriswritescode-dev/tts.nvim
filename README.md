@@ -71,7 +71,7 @@ Using [lazy.nvim](https://github.com/folke/lazy.nvim):
       playback = {
         auto_clear_queue = false,
         show_progress = true,
-        segmentation = 'sentence',           -- Split text into segments: 'sentence', 'line', or 'none'
+        segmentation = 'line',               -- Split text into segments: 'line', 'sentence', or 'none'
         chunk_size = 500,                    -- Max segment length before a segment is split further
         pause_between_chunks = 0,            -- Delay between segments on natural advance only (seconds)
         player = 'auto',                     -- Audio player: 'auto', 'mpv', 'ffplay', etc.
@@ -232,8 +232,8 @@ require('tts').setup({
 
 - `:TTSQueue [text]` - Append extra text to the current run, or show the queue when called without text
 - `:TTSClear` - Clear the queue
-- `:TTSNext` - Skip to the next sentence/line of the current reading
-- `:TTSPrev` - Go to the previous sentence/line of the current reading
+- `:TTSNext` - Skip to the next segment (accepts a count, e.g. `3:TTSNext`)
+- `:TTSPrev` - Go to the previous segment (accepts a count, e.g. `3:TTSPrev`)
 - `:TTSBackend <name>` - Switch backend (macos/openai)
 - `:TTSVoices` - List available voices
 - `:TTSSetVoice <voice>` - Set voice for current backend
@@ -247,8 +247,8 @@ require('tts').setup({
 
 - `<leader>tq` - Add to queue / show queue
 - `<leader>tc` - Clear queue
-- `<leader>tn` - Next sentence/line of the current reading
-- `<leader>tN` - Previous sentence/line of the current reading
+- `<leader>tn` - Skip N segments forward (`3<leader>tn` jumps 3 segments)
+- `<leader>tN` - Skip N segments back (`3<leader>tN` jumps back 3 segments)
 
 ### Usage Examples
 

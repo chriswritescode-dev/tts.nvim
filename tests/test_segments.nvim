@@ -15,7 +15,7 @@ local utils = require('tts.utils')
 local config = require('tts.config')
 
 local function reset()
-  require('tts.config').setup({})
+  require('tts.config').setup({ playback = { segmentation = 'sentence' } })
 end
 
 local function set_segmentation(mode)

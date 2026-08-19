@@ -59,13 +59,13 @@ function M._setup_commands()
     M.queue_clear()
   end, {})
   
-  vim.api.nvim_create_user_command('TTSNext', function()
-    M.queue_next()
-  end, {})
+  vim.api.nvim_create_user_command('TTSNext', function(cmd)
+    M.queue_next(math.max(cmd.count, vim.v.count1))
+  end, { count = true })
   
-  vim.api.nvim_create_user_command('TTSPrev', function()
-    M.queue_prev()
-  end, {})
+  vim.api.nvim_create_user_command('TTSPrev', function(cmd)
+    M.queue_prev(math.max(cmd.count, vim.v.count1))
+  end, { count = true })
   
   vim.api.nvim_create_user_command('TTSBackend', function(cmd)
     M.set_backend(cmd.args)
@@ -126,11 +126,11 @@ function M._setup_keymaps()
   end
   
   if keymaps.next then
-    map('n', keymaps.next, '<cmd>TTSNext<cr>', { desc = 'TTS: Next sentence/line' })
+    map('n', keymaps.next, '<cmd>TTSNext<cr>', { desc = 'TTS: Skip N segments forward' })
   end
   
   if keymaps.prev then
-    map('n', keymaps.prev, '<cmd>TTSPrev<cr>', { desc = 'TTS: Previous sentence/line' })
+    map('n', keymaps.prev, '<cmd>TTSPrev<cr>', { desc = 'TTS: Skip N segments back' })
   end
 end
 
@@ -275,14 +275,14 @@ function M.queue_list()
   vim.notify(table.concat(lines, '\n'), vim.log.levels.INFO)
 end
 
-function M.queue_next()
+function M.queue_next(count)
   local queue = require('tts.queue')
-  queue.skip()
+  queue.skip(count)
 end
 
-function M.queue_prev()
+function M.queue_prev(count)
   local queue = require('tts.queue')
-  queue.previous()
+  queue.previous(count)
 end
 
 function M.set_backend(name)
