@@ -164,12 +164,12 @@ function M.clean_markdown_text(text)
   -- Remove list markers but add pauses between items for better speech flow
   text = text:gsub('^%s*[-*+]%s+', '')
   text = text:gsub('\n%s*[-*+]%s+', '. ')  -- Add period for pause between list items
-  text = text:gsub('(%S)%s+[-*+]%s+', '%1. ')  -- Add period for pause in single-line lists
+  text = text:gsub('(%S)[^%S\n]+[-*+][^%S\n]+', '%1. ')  -- Add period for pause in single-line lists
   
   -- Remove numbered list markers and add pauses
   text = text:gsub('^%s*%d+%.%s+', '')
   text = text:gsub('\n%s*%d+%.%s+', '. ')  -- Add period for pause between numbered items
-  text = text:gsub('(%S)%s+%d+%.%s+', '%1. ')  -- Add period for pause in single-line numbered lists
+  text = text:gsub('(%S)[^%S\n]+%d+%.[^%S\n]+', '%1. ')  -- Add period for pause in single-line numbered lists
   
   -- Remove emphasis markers (bold, italic) - non-greedy matching
   text = text:gsub('%*%*%*(.-)%*%*%*', '%1')  -- Bold + italic
@@ -437,6 +437,29 @@ local function is_speakable(piece)
   return piece:match('[^%s%p]') ~= nil
 end
 
+local function group_lines(text, lines_per_segment)
+  local group_size = math.max(1, math.floor(tonumber(lines_per_segment) or 1))
+  local segments = {}
+  local group = {}
+
+  for line in text:gmatch('[^\n]+') do
+    line = vim.trim(line)
+    if is_speakable(line) then
+      table.insert(group, line)
+      if #group == group_size then
+        table.insert(segments, table.concat(group, '\n'))
+        group = {}
+      end
+    end
+  end
+
+  if #group > 0 then
+    table.insert(segments, table.concat(group, '\n'))
+  end
+
+  return segments
+end
+
 function M.split_segments(text)
   if not text or text:match('^%s*$') then
     return {}
@@ -449,22 +472,22 @@ function M.split_segments(text)
     return { vim.trim(text) }
   end
 
+  if mode == 'line' then
+    return group_lines(text, playback.lines_per_segment)
+  end
+
   local segments = {}
   for line in text:gmatch('[^\n]+') do
-    if mode == 'line' then
-      table.insert(segments, vim.trim(line))
-    else
-      local pos = 1
-      while true do
-        local s, e = line:find('[%.!%?]["%)%]]*%s+', pos)
-        if not s then
-          break
-        end
-        table.insert(segments, vim.trim(line:sub(pos, e)))
-        pos = e + 1
+    local pos = 1
+    while true do
+      local s, e = line:find('[%.!%?]["%)%]]*%s+', pos)
+      if not s then
+        break
       end
-      table.insert(segments, vim.trim(line:sub(pos)))
+      table.insert(segments, vim.trim(line:sub(pos, e)))
+      pos = e + 1
     end
+    table.insert(segments, vim.trim(line:sub(pos)))
   end
 
   local result = {}

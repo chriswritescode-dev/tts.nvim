@@ -32,6 +32,7 @@ M.defaults = {
 		player_args = {},
 		default_selection = 'section',
 		segmentation = 'line',
+		lines_per_segment = 5,
 	},
 
 	cache = {
@@ -142,6 +143,10 @@ function M.validate()
 
 	if config.playback.chunk_size and (type(config.playback.chunk_size) ~= 'number' or config.playback.chunk_size < 1) then
 		error("playback.chunk_size must be a positive number")
+	end
+
+	if config.playback.lines_per_segment and (type(config.playback.lines_per_segment) ~= 'number' or config.playback.lines_per_segment < 1) then
+		error("playback.lines_per_segment must be a positive number")
 	end
 
 	if config.openai.speed and (config.openai.speed < 0.25 or config.openai.speed > 4.0) then

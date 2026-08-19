@@ -44,6 +44,21 @@ local test_cases = {
     name = "Edge case - numbers not as list markers",
     input = "The version 2.0 is better than 1.0 for sure",
     expected = "The version 2.0 is better than 1.0 for sure"
+  },
+  {
+    name = "Line ending in a number keeps its number and newline",
+    input = "Line 1.\nLine 2.\nLine 3.",
+    expected = "Line 1.\nLine 2.\nLine 3."
+  },
+  {
+    name = "Trailing number before a newline is not a list marker",
+    input = "See chapter 1.\nThe next line.",
+    expected = "See chapter 1.\nThe next line."
+  },
+  {
+    name = "Trailing dash before a newline is not a list marker",
+    input = "Some text -\nNext line here",
+    expected = "Some text -\nNext line here"
   }
 }
 

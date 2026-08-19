@@ -223,7 +223,7 @@ tts.stop()
 check("progress is cleared on stop", vim.g.tts_progress == '', tostring(vim.g.tts_progress))
 
 -- line segmentation: one segment per line, so count jumps map to lines
-require('tts.config').setup({ playback = { segmentation = 'line' } })
+require('tts.config').setup({ playback = { segmentation = 'line', lines_per_segment = 1 } })
 queue.clear()
 tts.play("Line A.\nLine B.\nLine C.")
 check("line mode creates one segment per line", queue.size() == 3, "size=" .. queue.size())

@@ -18,8 +18,8 @@ local function reset()
   require('tts.config').setup({ playback = { segmentation = 'sentence' } })
 end
 
-local function set_segmentation(mode)
-  require('tts.config').setup({ playback = { segmentation = mode } })
+local function set_segmentation(mode, lines_per_segment)
+  require('tts.config').setup({ playback = { segmentation = mode, lines_per_segment = lines_per_segment } })
 end
 
 local function same_list(a, b)
@@ -75,10 +75,45 @@ check("non-Latin script segments kept",
   same_list(utils.split_segments("Привет мир. Как дела?"), { "Привет мир.", "Как дела?" }),
   fmt(utils.split_segments("Привет мир. Как дела?")))
 
-set_segmentation('line')
+set_segmentation('line', 1)
 check("line mode ignores sentence punctuation",
   same_list(utils.split_segments("First. Second here.\nThird one."), { "First. Second here.", "Third one." }),
   fmt(utils.split_segments("First. Second here.\nThird one.")))
+
+set_segmentation('line')
+do
+  local seven = "L1\nL2\nL3\nL4\nL5\nL6\nL7"
+  check("default groups 5 lines per segment",
+    same_list(utils.split_segments(seven), { "L1\nL2\nL3\nL4\nL5", "L6\nL7" }),
+    fmt(utils.split_segments(seven)))
+end
+
+set_segmentation('line', 2)
+check("lines_per_segment=2 groups pairs",
+  same_list(utils.split_segments("A\nB\nC"), { "A\nB", "C" }),
+  fmt(utils.split_segments("A\nB\nC")))
+
+set_segmentation('line', 3)
+check("blank and unspeakable lines do not fill a group",
+  same_list(utils.split_segments("A\n\n---\nB\n***\nC\nD"), { "A\nB\nC", "D" }),
+  fmt(utils.split_segments("A\n\n---\nB\n***\nC\nD")))
+
+set_segmentation('line', 5)
+do
+  local long_lines = {}
+  for i = 1, 5 do
+    long_lines[i] = string.rep("word ", 40) .. tostring(i)
+  end
+  local segs = utils.split_segments(table.concat(long_lines, "\n"))
+  check("grouped line segment is not split by chunk_size",
+    #segs == 1 and #segs[1] > 500,
+    "#segs=" .. tostring(#segs) .. " len1=" .. tostring(#segs[1]))
+end
+
+set_segmentation('line', 4)
+check("fewer lines than the group size still yield one segment",
+  same_list(utils.split_segments("Only one line"), { "Only one line" }),
+  fmt(utils.split_segments("Only one line")))
 
 set_segmentation('none')
 check("none mode returns one segment",
@@ -138,6 +173,15 @@ do
   local ok, err = pcall(require('tts.config').setup, { playback = { segmentation = 'paragraph' } })
   check("invalid segmentation rejected by config.setup", not ok,
     ok and "no error raised" or err)
+end
+
+do
+  local ok, err = pcall(require('tts.config').setup, { playback = { lines_per_segment = 0 } })
+  check("lines_per_segment 0 rejected by config.setup", not ok,
+    ok and "no error raised" or err)
+  check("rejected setup rolls back lines_per_segment",
+    require('tts.config').get().playback.lines_per_segment == 5,
+    tostring(require('tts.config').get().playback.lines_per_segment))
 end
 
 do

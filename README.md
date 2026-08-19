@@ -22,7 +22,7 @@ require('tts').setup({
 - **Smart Text Selection**: Visual mode, line/paragraph, and motion-based selection
 - **Intelligent Content Filtering**: Removes paths, URLs, and technical content for better TTS
 - **Playback Control**: Play and stop with basic state management
-- **Segment Playback**: A selection is split into sentences or lines and played in order, with next/prev navigation between them
+- **Segment Playback**: A selection is split into segments and played in order, with next/prev navigation between them. In `line` mode a segment is a group of `lines_per_segment` lines (5 by default), so next/prev jumps a whole group rather than a single line
 - **Audio Caching**: The OpenAI-compatible backend caches each segment's audio (keyed by text, endpoint, model, voice, speed and format), so replaying a segment costs no HTTP request
 - **Text Preprocessing**: Clean code comments, expand abbreviations, language-specific replacements
 
@@ -72,7 +72,8 @@ Using [lazy.nvim](https://github.com/folke/lazy.nvim):
         auto_clear_queue = false,
         show_progress = true,
         segmentation = 'line',               -- Split text into segments: 'line', 'sentence', or 'none'
-        chunk_size = 500,                    -- Max segment length before a segment is split further
+        lines_per_segment = 5,               -- 'line' mode only: how many lines make up one segment
+        chunk_size = 500,                    -- Max segment length before a segment is split further ('sentence' mode only)
         pause_between_chunks = 0,            -- Delay between segments on natural advance only (seconds)
         player = 'auto',                     -- Audio player: 'auto', 'mpv', 'ffplay', etc.
         player_args = {},                    -- Custom player arguments
