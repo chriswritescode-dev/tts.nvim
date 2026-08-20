@@ -1,10 +1,15 @@
 " Test that every playback entry point routes through the queue
+let g:tts_test_root = expand('<sfile>:p:h:h')
 lua << EOF
 for k in pairs(package.loaded) do
   if k:find('^tts') then package.loaded[k] = nil end
 end
 
-package.path = vim.fn.getcwd() .. "/lua/?.lua;" .. vim.fn.getcwd() .. "/lua/?/init.lua;" .. package.path
+local tts_test_root = vim.g.tts_test_root
+if tts_test_root == nil or tts_test_root == '' then
+  tts_test_root = vim.fn.getcwd()
+end
+package.path = tts_test_root .. "/lua/?.lua;" .. tts_test_root .. "/lua/?/init.lua;" .. package.path
 
 local after_play_calls = {}
 
@@ -76,6 +81,7 @@ check("play starts at index 1",
   queue.get_current() and queue.get_current().text or "nil")
 check("after_play does not fire mid-run", #after_play_calls == 0, #after_play_calls)
 check("progress shows 1/3 after play", vim.g.tts_progress == '1/3', tostring(vim.g.tts_progress))
+check("play prefetches the next segment", #prefetched == 1 and prefetched[1] == "Two.", table.concat(prefetched, ' | '))
 
 -- next/prev work immediately after play(), without a separate entry point
 queue.skip()
@@ -83,10 +89,12 @@ check("skip works right after play",
   queue.get_current() and queue.get_current().text == "Two.",
   queue.get_current() and queue.get_current().text or "nil")
 check("progress shows 2/3 after skip", vim.g.tts_progress == '2/3', tostring(vim.g.tts_progress))
+check("skip prefetches the new next segment", #prefetched == 2 and prefetched[2] == "Three.", table.concat(prefetched, ' | '))
 queue.previous()
 check("previous works right after play",
   queue.get_current() and queue.get_current().text == "One.",
   queue.get_current() and queue.get_current().text or "nil")
+check("previous prefetches the segment after the new current", #prefetched == 3 and prefetched[3] == "Two.", table.concat(prefetched, ' | '))
 
 -- driving all completions fires after_play exactly once with the original text
 captured[#captured]() -- complete segment 1 (re-spoken by previous())
@@ -96,6 +104,7 @@ check("progress is cleared when the run finishes", vim.g.tts_progress == '', tos
 check("after_play fires exactly once at run end", #after_play_calls == 1, #after_play_calls)
 check("after_play receives the original selection text",
   after_play_calls[1] == "One. Two. Three.", after_play_calls[1] or "nil")
+check("playing the final segment prefetches nothing", #prefetched == 4, table.concat(prefetched, ' | '))
 
 -- a second play() replaces the previous run entirely
 tts.play("X. Y.")

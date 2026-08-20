@@ -91,6 +91,7 @@ function M.preprocess_text(text)
   text = text:gsub(' *\n *', '\n')  -- Trim spaces around newlines
   text = text:gsub('\n+', '\n')  -- Collapse blank lines
   text = text:gsub('^%s*[%-%*%+]%s+', '')  -- Remove leading list markers
+  text = text:gsub('\n%s*[%-%*%+]%s+', '\n')  -- Remove list markers on later lines
   text = text:gsub('%.%s*[%-%*%+]%s+', '. ')  -- Clean up ". -" to ". "
   text = vim.trim(text)
   
@@ -419,6 +420,10 @@ function M.chunk_text(text, chunk_size)
       end
     end
     
+    if chunk_end < current_pos then
+      chunk_end = current_pos
+    end
+
     chunk_end = chunk_end + vim.str_utf_end(text, chunk_end)
     
     local chunk = text:sub(current_pos, chunk_end)

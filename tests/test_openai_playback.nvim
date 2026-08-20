@@ -1,10 +1,15 @@
 " Test OpenAI backend: completion, supersession, cache, and prefetch
+let g:tts_test_root = expand('<sfile>:p:h:h')
 lua << EOF
 for k in pairs(package.loaded) do
   if k:find('^tts') then package.loaded[k] = nil end
 end
 
-package.path = vim.fn.getcwd() .. "/lua/?.lua;" .. vim.fn.getcwd() .. "/lua/?/init.lua;" .. package.path
+local tts_test_root = vim.g.tts_test_root
+if tts_test_root == nil or tts_test_root == '' then
+  tts_test_root = vim.fn.getcwd()
+end
+package.path = tts_test_root .. "/lua/?.lua;" .. tts_test_root .. "/lua/?/init.lua;" .. package.path
 
 local cache_dir = vim.fn.tempname()
 require('tts.config').setup({ cache = { directory = cache_dir, cleanup_on_start = false } })
@@ -41,6 +46,10 @@ local function cache_path_for(text, voice)
 end
 
 -- Run scheduled callbacks inline so notification side effects are observable
+local real_notify = vim.notify
+local real_schedule = vim.schedule
+local real_defer_fn = vim.defer_fn
+local real_tempname = vim.fn.tempname
 local notify_count = 0
 vim.notify = function(msg, level)
   notify_count = notify_count + 1
@@ -56,7 +65,7 @@ end
 -- jobstart captures per-job callbacks and returns sequential ids, jobstop
 -- records ids and simulates the killed process's exit so the supersession
 -- branch is observable for exactly the job that was killed.
-local temp_base = '/tmp/tts_test_audio'
+local temp_base = real_tempname()
 local temp_files = {}
 local temp_counter = 0
 local temp_file = nil
@@ -446,6 +455,12 @@ for _, f in ipairs(temp_files) do
   vim.fn.delete(f)
 end
 vim.fn.delete(cache_dir, 'rf')
+vim.fn.delete(vim.fn.fnamemodify(temp_base, ':h'), 'rf')
+
+vim.notify = real_notify
+vim.schedule = real_schedule
+vim.defer_fn = real_defer_fn
+vim.fn.tempname = real_tempname
 
 if not body_ok then
   failed = failed + 1

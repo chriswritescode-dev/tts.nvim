@@ -1,10 +1,15 @@
 " Test segment following: line provenance, cursor jump, and highlight
+let g:tts_test_root = expand('<sfile>:p:h:h')
 lua << EOF
 for k in pairs(package.loaded) do
   if k:find('^tts') then package.loaded[k] = nil end
 end
 
-package.path = vim.fn.getcwd() .. "/lua/?.lua;" .. vim.fn.getcwd() .. "/lua/?/init.lua;" .. package.path
+local tts_test_root = vim.g.tts_test_root
+if tts_test_root == nil or tts_test_root == '' then
+  tts_test_root = vim.fn.getcwd()
+end
+package.path = tts_test_root .. "/lua/?.lua;" .. tts_test_root .. "/lua/?/init.lua;" .. package.path
 
 local tts = require('tts')
 local backends = require('tts.backends')

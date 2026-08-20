@@ -5,6 +5,7 @@ local active = false
 local play_token = 0
 local run_text = nil
 local finished = false
+local pending_advance = false
 
 local function invalidate()
   play_token = play_token + 1
@@ -42,6 +43,7 @@ end
 function M.stop()
   invalidate()
   active = false
+  pending_advance = false
   require('tts.utils').progress(nil)
   require('tts.follow').clear()
   require('tts.backends').stop()
@@ -119,6 +121,7 @@ function M.play_index(index)
   end
 
   halt()
+  pending_advance = false
   current_index = index
 
   require('tts.utils').progress(string.format('%d/%d', index, #items))
@@ -144,20 +147,23 @@ function M.play_index(index)
     end
   end
 
+  local settled = false
   local handle = require('tts.backends').speak(item.text, vim.tbl_extend('force', item.opts or {}, {
-    on_complete = function()
+    on_complete = function(code)
       if token ~= play_token then
         return
       end
-      item.status = 'completed'
+      settled = true
+      item.status = (code and code ~= 0) and 'error' or 'completed'
       active = false
       M._advance()
     end
   }))
 
-  if not handle then
+  if not handle and not settled then
     item.status = 'error'
     active = false
+    M._advance()
     return false
   end
 
@@ -172,6 +178,7 @@ end
 function M._advance()
   local pause = require('tts.config').get().playback.pause_between_chunks or 0
   local function advance()
+    pending_advance = false
     if current_index >= #items then
       M._finish()
     else
@@ -181,6 +188,7 @@ function M._advance()
 
   if pause > 0 then
     local token = play_token
+    pending_advance = true
     vim.defer_fn(function()
       if token ~= play_token then
         return
@@ -198,6 +206,7 @@ function M._finish()
   end
   finished = true
   active = false
+  pending_advance = false
   require('tts.utils').progress(nil)
   require('tts.follow').clear()
 
@@ -227,6 +236,11 @@ function M.set_segments(segments, run)
   current_index = 0
   run_text = run and run.original_text
 
+  if #items == 0 then
+    require('tts.utils').progress(nil)
+    require('tts.follow').clear()
+  end
+
   vim.api.nvim_exec_autocmds('User', {
     pattern = 'TTSQueueUpdate',
     data = { action = 'set', count = #items }
@@ -247,7 +261,7 @@ function M.append(segments, run)
     data = { action = 'add', count = #items }
   })
 
-  if not active then
+  if not active and not pending_advance then
     run_text = run and run.original_text
     M.play_index(current_index + 1)
   end
@@ -319,6 +333,7 @@ end
 
 function M.remove(index)
   if index > 0 and index <= #items then
+    local was_playing = active and current_index == index
     table.remove(items, index)
 
     if current_index > index then
@@ -333,6 +348,15 @@ function M.remove(index)
       pattern = 'TTSQueueUpdate',
       data = { action = 'remove', count = #items }
     })
+
+    if was_playing then
+      if current_index >= 1 and current_index <= #items then
+        M.play_index(current_index)
+      else
+        halt()
+        M._finish()
+      end
+    end
 
     return true
   end

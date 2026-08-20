@@ -109,7 +109,7 @@ local config = vim.deepcopy(M.defaults)
 
 function M.setup(opts)
 	local previous = config
-	config = vim.tbl_deep_extend('force', M.defaults, opts or {})
+	config = vim.tbl_deep_extend('force', vim.deepcopy(M.defaults), opts or {})
 	local ok, err = pcall(M.validate)
 	if not ok then
 		config = previous

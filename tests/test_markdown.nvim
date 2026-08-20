@@ -1,4 +1,5 @@
 " Test markdown filtering in Neovim
+let g:tts_test_root = expand('<sfile>:p:h:h')
 lua << EOF
 -- Clear any cached tts modules so source changes take effect
 for k in pairs(package.loaded) do
@@ -6,7 +7,11 @@ for k in pairs(package.loaded) do
 end
 
 -- Add repo lua directory to path
-package.path = vim.fn.getcwd() .. "/lua/?.lua;" .. package.path
+local tts_test_root = vim.g.tts_test_root
+if tts_test_root == nil or tts_test_root == '' then
+  tts_test_root = vim.fn.getcwd()
+end
+package.path = tts_test_root .. "/lua/?.lua;" .. package.path
 
 -- Initialize config with defaults so clean_markdown_text works
 require('tts.config').setup({})

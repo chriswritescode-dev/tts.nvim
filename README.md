@@ -235,8 +235,8 @@ require('tts').setup({
 
 - `:TTSQueue [text]` - Append extra text to the current run, or show the queue when called without text
 - `:TTSClear` - Clear the queue
-- `:TTSNext` - Skip to the next segment (accepts a count, e.g. `3:TTSNext`)
-- `:TTSPrev` - Go to the previous segment (accepts a count, e.g. `3:TTSPrev`)
+- `:TTSNext` - Skip to the next segment (accepts a count, e.g. `:3TTSNext`)
+- `:TTSPrev` - Go to the previous segment (accepts a count, e.g. `:3TTSPrev`)
 - `:TTSBackend <name>` - Switch backend (macos/openai)
 - `:TTSVoices` - List available voices
 - `:TTSSetVoice <voice>` - Set voice for current backend
@@ -379,7 +379,7 @@ Uses OpenAI-compatible TTS API (official OpenAI, Kokoro FastAPI, etc.):
 
 The plugin fires `User` autocmds you can listen to with `vim.api.nvim_create_autocmd('User', { pattern = ..., callback = ... })`:
 
-- `TTSPlayStart` / `TTSPlayEnd` fire once **per segment** — the current text and backend are passed as `data` on start, the backend name on end.
+- `TTSPlayStart` / `TTSPlayEnd` fire once **per segment** — the current text and backend are passed as `data` on start, the backend name on end. `TTSPlayEnd` fires only on successful completion: failed starts (missing audio player, synthesis or API error, unreadable audio) and explicit stops do not produce a matching `TTSPlayEnd`.
 - `TTSQueueUpdate` fires for run-level UI: its `data` carries `action` (`set`, `add`, `play`, `stop`, `finish`, `clear`, `remove`) plus `index` and `count` when relevant (a `play` event includes both).
 
 ### API Reference

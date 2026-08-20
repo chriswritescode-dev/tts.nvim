@@ -1,10 +1,15 @@
 " Test queue-owned segment playback
+let g:tts_test_root = expand('<sfile>:p:h:h')
 lua << EOF
 for k in pairs(package.loaded) do
   if k:find('^tts') then package.loaded[k] = nil end
 end
 
-package.path = vim.fn.getcwd() .. "/lua/?.lua;" .. vim.fn.getcwd() .. "/lua/?/init.lua;" .. package.path
+local tts_test_root = vim.g.tts_test_root
+if tts_test_root == nil or tts_test_root == '' then
+  tts_test_root = vim.fn.getcwd()
+end
+package.path = tts_test_root .. "/lua/?.lua;" .. tts_test_root .. "/lua/?/init.lua;" .. package.path
 
 require('tts.config').setup({})
 
@@ -54,6 +59,7 @@ print("=" .. string.rep("=", 60))
 
 -- The assertion body is pcall-wrapped so a Lua error inside the module under
 -- test surfaces as a failure (cquit 1) instead of aborting with exit 0.
+local original_defer_fn = vim.defer_fn
 local body_ok, body_err = pcall(function()
 
 -- Natural advance: a three-segment run plays 1 -> 2 -> 3 driven purely by
@@ -267,7 +273,6 @@ check("last segment prefetches nothing", #prefetched == p_start + 2, table.conca
 
 -- Phase 12: pause_between_chunks applies only to natural advance
 local deferred = {}
-local original_defer_fn = vim.defer_fn
 vim.defer_fn = function(fn, ms)
   table.insert(deferred, { fn = fn, ms = ms })
 end
@@ -318,9 +323,62 @@ check("stale deferred advance leaves current at segment 3",
   queue.get_current() and queue.get_current().text == "C2.",
   queue.get_current() and queue.get_current().text or "nil")
 
+-- Phase 13: an append arriving during the pause is a mid-run append
+local before_pause_append = #spoken
+queue.set_segments({ "P1.", "P2." })
+captured[#captured]()
+local deferred_before = #deferred
+queue.append({ "P3." })
+check("append during the pause does not start a second run",
+  #spoken == before_pause_append + 1, spoken_texts())
+check("append during the pause schedules no extra defer",
+  #deferred == deferred_before, "deferred=" .. #deferred)
+
+deferred[#deferred].fn()
+check("the pending advance still plays segment 2 after an append",
+  #spoken == before_pause_append + 2 and spoken[#spoken] == "P2.", spoken_texts())
+
 vim.defer_fn = original_defer_fn
+require('tts.config').get().playback.pause_between_chunks = 0
+
+-- Phase 14: a backend that cannot start playback must not stall the run
+local original_speak = backends.speak
+local before_fail = #spoken
+backends.speak = function(text, opts)
+  table.insert(spoken, text)
+  return nil
+end
+
+queue.set_segments({ "F1.", "F2." })
+check("failed playback still attempts every segment",
+  #spoken == before_fail + 2, spoken_texts())
+check("failed playback does not leave the run active", queue.is_active() == false)
+
+backends.speak = original_speak
+
+-- Phase 15: removing the playing item restarts at the shifted item
+local before_remove = #spoken
+queue.set_segments({ "R1.", "R2.", "R3." })
+check("remove setup speaks segment 1",
+  #spoken == before_remove + 1 and spoken[#spoken] == "R1.", spoken_texts())
+
+queue.remove(1)
+check("removing the playing item plays the item that shifted into its slot",
+  #spoken == before_remove + 2 and spoken[#spoken] == "R2.", spoken_texts())
+check("removing the playing item leaves two items", queue.size() == 2, "size=" .. queue.size())
+
+captured[#captured]()
+check("the shifted item still advances to the final segment",
+  #spoken == before_remove + 3 and spoken[#spoken] == "R3.", spoken_texts())
+
+queue.set_segments({ "S1." })
+queue.remove(1)
+check("removing the only playing item empties the queue", queue.size() == 0, "size=" .. queue.size())
+check("removing the only playing item ends the run", queue.is_active() == false)
 
 end)
+
+vim.defer_fn = original_defer_fn
 
 if not body_ok then
   failed = failed + 1

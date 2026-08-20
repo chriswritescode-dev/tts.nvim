@@ -56,7 +56,8 @@ function M._execute_async(cmd, opts)
   job_token = job_token + 1
   local token = job_token
 
-  current_job = vim.loop.spawn('sh', {
+  local handle
+  handle = vim.loop.spawn('sh', {
     args = { '-c', cmd },
     stdio = { nil, stdout, stderr }
   }, function(code, signal)
@@ -66,13 +67,13 @@ function M._execute_async(cmd, opts)
     if stderr then
       stderr:close()
     end
+    if handle and not handle:is_closing() then
+      handle:close()
+    end
     if token ~= job_token then
       return
     end
-    if current_job then
-      current_job:close()
-      current_job = nil
-    end
+    current_job = nil
 
     vim.schedule(function()
       local state = require('tts.state')
@@ -91,6 +92,13 @@ function M._execute_async(cmd, opts)
     end)
   end)
 
+  if not handle then
+    vim.notify('TTS: failed to start say', vim.log.levels.ERROR)
+    return nil
+  end
+
+  current_job = handle
+
   return {
     stop = function()
       M.stop()
@@ -99,8 +107,12 @@ function M._execute_async(cmd, opts)
 end
 
 function M.stop()
-  if current_job and not current_job:is_closing() then
-    current_job:kill('sigterm')
+  job_token = job_token + 1
+
+  if current_job then
+    if not current_job:is_closing() then
+      current_job:kill('sigterm')
+    end
     current_job = nil
   end
   

@@ -1,6 +1,7 @@
 local M = {}
 local cache_index = {}
 local cache_dir = nil
+local dirty = false
 
 local function usable(path)
   return vim.fn.filereadable(path) == 1 and vim.fn.getfsize(path) > 0
@@ -42,6 +43,9 @@ function M.get_path(key, ext)
   if not cache_dir then
     M.init()
   end
+  if not cache_dir then
+    return nil
+  end
   return cache_dir .. '/' .. key .. '.' .. (ext or 'audio')
 end
 
@@ -56,6 +60,9 @@ function M.get(key, ext)
   end
   
   local path = M.get_path(key, ext)
+  if not path then
+    return nil
+  end
   
   if usable(path) then
     local entry = cache_index[key]
@@ -71,7 +78,7 @@ function M.get(key, ext)
         hits = 1
       }
     end
-    M.save_index()
+    dirty = true
     return path
   end
   
@@ -88,7 +95,12 @@ function M.has(key, ext)
     return false
   end
   
-  return usable(M.get_path(key, ext))
+  local path = M.get_path(key, ext)
+  if not path then
+    return false
+  end
+  
+  return usable(path)
 end
 
 function M.set(key, file_path)
@@ -103,6 +115,9 @@ function M.set(key, file_path)
   
   local ext = file_path:match('%.([%w]+)$')
   local cache_path = M.get_path(key, ext)
+  if not cache_path then
+    return false
+  end
   
   if file_path ~= cache_path then
     local copied = vim.loop.fs_copyfile(file_path, cache_path)
@@ -181,17 +196,15 @@ function M.cleanup()
     end
   end
   
+  local indexed_paths = {}
+  for _, entry in pairs(cache_index) do
+    indexed_paths[entry.path] = true
+  end
+
   for _, name in ipairs(cached_files()) do
     local path = cache_dir .. '/' .. name
-    local indexed = false
-    for _, entry in pairs(cache_index) do
-      if entry.path == path then
-        indexed = true
-        break
-      end
-    end
-    
-    if not indexed then
+
+    if not indexed_paths[path] then
       local age = current_time - vim.fn.getftime(path)
       if age > max_age_seconds then
         if vim.fn.filereadable(path) == 1 then
@@ -252,6 +265,8 @@ function M.save_index()
     file:write(data)
     file:close()
   end
+
+  dirty = false
 end
 
 function M.load_index()
@@ -313,5 +328,16 @@ function M.generate_key(text, opts)
   
   return vim.fn.sha256(key_string)
 end
+
+local function flush_index()
+  if dirty then
+    M.save_index()
+  end
+end
+
+vim.api.nvim_create_autocmd('VimLeavePre', {
+  group = vim.api.nvim_create_augroup('TTSCacheFlush', { clear = true }),
+  callback = flush_index,
+})
 
 return M

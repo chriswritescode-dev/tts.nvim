@@ -1,10 +1,15 @@
 " Test cache keys, paths and retention
+let g:tts_test_root = expand('<sfile>:p:h:h')
 lua << EOF
 for k in pairs(package.loaded) do
   if k:find('^tts') then package.loaded[k] = nil end
 end
 
-package.path = vim.fn.getcwd() .. "/lua/?.lua;" .. vim.fn.getcwd() .. "/lua/?/init.lua;" .. package.path
+local tts_test_root = vim.g.tts_test_root
+if tts_test_root == nil or tts_test_root == '' then
+  tts_test_root = vim.fn.getcwd()
+end
+package.path = tts_test_root .. "/lua/?.lua;" .. tts_test_root .. "/lua/?/init.lua;" .. package.path
 
 require('tts.config').setup({})
 
@@ -86,6 +91,7 @@ local body_ok, body_err = pcall(function()
   check("get path ends in the source extension", got ~= nil and got:match('%.mp3$') ~= nil, got or 'nil')
 
   -- has is a side-effect-free probe; get records the hit
+  cache.save_index()
   idx = read_index(cache_dir)
   local hits_after_get = idx[key].hits
   check("has is true for a cached entry", cache.has(key, 'mp3') == true)
@@ -93,6 +99,7 @@ local body_ok, body_err = pcall(function()
   idx = read_index(cache_dir)
   check("has leaves hits untouched", idx[key].hits == hits_after_get, idx[key].hits .. " vs " .. hits_after_get)
   check("get returns the same path", cache.get(key, 'mp3') == got)
+  cache.save_index()
   idx = read_index(cache_dir)
   check("get increments hits", idx[key].hits == hits_after_get + 1, idx[key].hits .. " vs " .. (hits_after_get + 1))
 
@@ -100,6 +107,7 @@ local body_ok, body_err = pcall(function()
   local created_before = idx[key].created
   local size_before = idx[key].size
   cache.get(key, 'mp3')
+  cache.save_index()
   idx = read_index(cache_dir)
   check("get hit preserves created",
     created_before ~= nil and idx[key] and idx[key].created == created_before,
@@ -137,6 +145,7 @@ local body_ok, body_err = pcall(function()
   local ghost_key = cache.generate_key("orphan on disk.")
   write_file(cache.get_path(ghost_key), string.rep('g', 100))
   check("get adopts an unindexed on-disk file", cache.get(ghost_key) ~= nil)
+  cache.save_index()
   idx = read_index(cache_dir)
   check("adopted entry records size",
     idx[ghost_key] ~= nil and idx[ghost_key].size == 100, vim.inspect(idx[ghost_key]))

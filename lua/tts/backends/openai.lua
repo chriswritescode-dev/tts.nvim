@@ -54,6 +54,20 @@ function M.is_available()
   return false
 end
 
+local function request_config(config, opts)
+  local merged = vim.tbl_extend('force', config, {})
+
+  for _, field in ipairs({ 'model', 'voice', 'speed', 'format' }) do
+    if opts and opts[field] ~= nil then
+      merged[field] = opts[field]
+    end
+  end
+
+  merged.format = merged.format or 'mp3'
+
+  return merged
+end
+
 local function synthesize(text, config, record)
   -- Create temp file for audio
   local temp_file = vim.fn.tempname() .. '.' .. (config.format or 'mp3')
@@ -135,6 +149,13 @@ local function synthesize(text, config, record)
         prefetch_request = nil
       end
 
+      local function fail()
+        vim.fn.delete(temp_file)
+        if record.on_error then
+          record.on_error()
+        end
+      end
+
       if exit_code ~= 0 then
         local error_msg = table.concat(stderr_data, '\n')
         local stdout_msg = table.concat(stdout_data, '\n')
@@ -147,7 +168,7 @@ local function synthesize(text, config, record)
             vim.notify('TTS API failed with exit code: ' .. exit_code, vim.log.levels.ERROR)
           end
         end)
-        vim.fn.delete(temp_file)
+        fail()
         return
       end
 
@@ -157,7 +178,7 @@ local function synthesize(text, config, record)
         vim.schedule(function()
           vim.notify('TTS API returned no audio data', vim.log.levels.ERROR)
         end)
-        vim.fn.delete(temp_file)
+        fail()
         return
       end
 
@@ -173,7 +194,7 @@ local function synthesize(text, config, record)
               vim.notify('TTS API error: ' .. (json.error.message or json.error), vim.log.levels.ERROR)
             end)
           end
-          vim.fn.delete(temp_file)
+          fail()
           return
         end
       end
@@ -218,7 +239,7 @@ end
 
 function M.speak(text, opts)
   opts = opts or {}
-  local config = require('tts.config').get().openai
+  local config = request_config(require('tts.config').get().openai, opts)
 
   -- Validate input text
   if not text or text == '' or text:match('^%s*$') then
@@ -250,6 +271,11 @@ function M.speak(text, opts)
     record.on_ready = function(file, is_temp)
       M._play_audio(file, opts, is_temp)
     end
+    record.on_error = function()
+      if opts.on_complete then
+        opts.on_complete(1)
+      end
+    end
     return {
       stop = function()
         M.stop()
@@ -263,6 +289,11 @@ function M.speak(text, opts)
     format = config.format,
     on_ready = function(file, is_temp)
       M._play_audio(file, opts, is_temp)
+    end,
+    on_error = function()
+      if opts.on_complete then
+        opts.on_complete(1)
+      end
     end,
   }
   current_request = record
@@ -292,7 +323,7 @@ function M.prefetch(text, opts)
     return
   end
 
-  local backend = config.openai
+  local backend = request_config(config.openai, opts)
   local key = cache_key(text, backend)
   if require('tts.cache').has(key, backend.format) then
     return
@@ -320,11 +351,15 @@ function M.prefetch(text, opts)
 end
 
 function M._play_audio(file, opts, is_temp)
+  opts = opts or {}
+
   if not file or vim.fn.filereadable(file) ~= 1 then
+    if opts.on_complete then
+      opts.on_complete(1)
+    end
     return
   end
 
-  opts = opts or {}
   local player = require('tts.player')
   local handle = player.play(file, vim.tbl_extend('force', opts, {
     on_complete = function(code)
@@ -348,6 +383,9 @@ function M._play_audio(file, opts, is_temp)
   if not handle then
     if is_temp then
       vim.fn.delete(file)
+    end
+    if opts.on_complete then
+      opts.on_complete(1)
     end
   end
 end

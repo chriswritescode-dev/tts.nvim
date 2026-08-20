@@ -28,9 +28,14 @@ local function spawn(player, args, opts)
 	local token = job_token
 	current_player = player
 
-	current_job = vim.loop.spawn(player, {
+	local handle
+	handle = vim.loop.spawn(player, {
 		args = args
 	}, function(code)
+		if handle and not handle:is_closing() then
+			handle:close()
+		end
+
 		if token ~= job_token then
 			return
 		end
@@ -38,9 +43,13 @@ local function spawn(player, args, opts)
 		current_job = nil
 
 		vim.schedule(function()
-			if code == 0 then
-				local state = require('tts.state')
-				state.transition('idle')
+			require('tts.state').transition('idle')
+
+			if code ~= 0 then
+				vim.notify(
+					string.format('TTS: player %s exited with code %d', tostring(player), code),
+					vim.log.levels.WARN
+				)
 			end
 
 			if opts.on_complete then
@@ -48,6 +57,13 @@ local function spawn(player, args, opts)
 			end
 		end)
 	end)
+
+	if not handle then
+		vim.notify('TTS: failed to start player ' .. tostring(player), vim.log.levels.ERROR)
+		return nil
+	end
+
+	current_job = handle
 
 	return {
 		stop = function()
@@ -143,6 +159,8 @@ end
 
 
 function M.stop()
+	job_token = job_token + 1
+
 	if current_job then
 		if not current_job:is_closing() then
 			current_job:kill('sigterm')

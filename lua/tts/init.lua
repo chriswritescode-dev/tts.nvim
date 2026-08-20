@@ -134,7 +134,15 @@ function M._setup_keymaps()
   end
 end
 
-function M._prepare_segments(text)
+local function apply_before_play(text)
+  local hooks = require('tts.config').get().hooks
+  if hooks and hooks.before_play then
+    return hooks.before_play(text)
+  end
+  return nil
+end
+
+function M._prepare_segments(text, skip_before_play)
   local utils = require('tts.utils')
   text = utils.preprocess_text(text)
 
@@ -142,15 +150,17 @@ function M._prepare_segments(text)
     return {}
   end
 
-  local hooks = require('tts.config').get().hooks
-  if hooks and hooks.before_play then
-    local modified = hooks.before_play(text)
-    if modified then
-      text = modified
-    end
+  local segments = utils.split_segments(text)
+  if #segments == 0 or skip_before_play then
+    return segments
   end
 
-  return utils.split_segments(text)
+  local modified = apply_before_play(text)
+  if modified then
+    return utils.split_segments(modified)
+  end
+
+  return segments
 end
 
 function M.play(text, opts)
@@ -162,7 +172,7 @@ function M.play(text, opts)
 
   local segments = M._prepare_segments(text)
   if #segments == 0 then
-    vim.notify('Text became empty after preprocessing', vim.log.levels.WARN)
+    vim.notify('Text produced no speakable segments', vim.log.levels.WARN)
     return
   end
 
@@ -178,9 +188,26 @@ function M.play_lines(first, last, opts)
     return
   end
 
+  local utils = require('tts.utils')
+  local raw = table.concat(lines, '\n')
+  local prepared = utils.preprocess_text(raw)
+
+  if prepared and prepared ~= '' and #utils.split_segments(prepared) > 0 then
+    local modified = apply_before_play(prepared)
+    if modified then
+      local pieces = utils.split_segments(modified)
+      if #pieces == 0 then
+        vim.notify('Text produced no speakable segments', vim.log.levels.WARN)
+        return
+      end
+      require('tts.queue').set_segments(pieces, { opts = opts or {}, original_text = raw })
+      return
+    end
+  end
+
   local segments = {}
-  for _, group in ipairs(require('tts.utils').group_source_lines(lines, first)) do
-    for _, piece in ipairs(M._prepare_segments(group.text)) do
+  for _, group in ipairs(utils.group_source_lines(lines, first)) do
+    for _, piece in ipairs(M._prepare_segments(group.text, true)) do
       table.insert(segments, {
         text = piece,
         range = { bufnr = bufnr, first = group.first, last = group.last },
@@ -189,7 +216,7 @@ function M.play_lines(first, last, opts)
   end
 
   if #segments == 0 then
-    vim.notify('Text became empty after preprocessing', vim.log.levels.WARN)
+    vim.notify('Text produced no speakable segments', vim.log.levels.WARN)
     return
   end
 
@@ -212,8 +239,15 @@ function M.play_selection()
   local mode = vim.fn.mode()
 
   if mode == 'v' or mode == 'V' or mode == '\22' then
+    local saved_v = vim.fn.getreginfo('v')
+    local saved_unnamed = vim.fn.getreginfo('"')
+
     vim.cmd('normal! "vy')
     local selected = vim.fn.getreg('v')
+
+    vim.fn.setreg('v', saved_v)
+    vim.fn.setreg('"', saved_unnamed)
+
     if selected and selected ~= '' then
       M.play(selected)
     else
