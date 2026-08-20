@@ -1,5 +1,21 @@
 " Test markdown filtering in Neovim
+let g:tts_test_root = expand('<sfile>:p:h:h')
 lua << EOF
+-- Clear any cached tts modules so source changes take effect
+for k in pairs(package.loaded) do
+  if k:find('^tts') then package.loaded[k] = nil end
+end
+
+-- Add repo lua directory to path
+local tts_test_root = vim.g.tts_test_root
+if tts_test_root == nil or tts_test_root == '' then
+  tts_test_root = vim.fn.getcwd()
+end
+package.path = tts_test_root .. "/lua/?.lua;" .. package.path
+
+-- Initialize config with defaults so clean_markdown_text works
+require('tts.config').setup({})
+
 -- Load the utils module
 local utils = require('tts.utils')
 
@@ -39,6 +55,36 @@ local test_cases = {
     name = "Emphasis without proper pairing",
     input = "Text with *single asterisk and _single underscore",
     expected = "Text with single asterisk and single underscore"
+  },
+  {
+    name = "List markers",
+    input = "- First item\n* Second item\n+ Third item",
+    expected = "First item. Second item. Third item"
+  },
+  {
+    name = "Blockquotes",
+    input = "> This is a quote\n>> Nested quote",
+    expected = "This is a quote\nNested quote"
+  },
+  {
+    name = "Code blocks",
+    input = "```lua\nlocal x = #comment\n```\nSome text with `inline code`",
+    expected = " local x = comment \nSome text with inline code"
+  },
+  {
+    name = "Links and images",
+    input = "[link text](url) and ![alt](image.png)",
+    expected = "link text and "
+  },
+  {
+    name = "Horizontal rules",
+    input = "Text above\n---\nText below\n***\nMore text",
+    expected = "Text above\nText below\nMore text"
+  },
+  {
+    name = "Multiple consecutive markers",
+    input = "****Multiple asterisks**** and ____underscores____",
+    expected = "Multiple asterisks and underscores"
   }
 }
 
@@ -73,5 +119,9 @@ if failed == 0 then
   print("🎉 All tests passed!")
 else
   print("⚠️  Some tests failed")
+end
+
+if failed > 0 then
+  vim.cmd('cquit 1')
 end
 EOF

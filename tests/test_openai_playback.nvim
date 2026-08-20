@@ -1,0 +1,476 @@
+" Test OpenAI backend: completion, supersession, cache, and prefetch
+let g:tts_test_root = expand('<sfile>:p:h:h')
+lua << EOF
+for k in pairs(package.loaded) do
+  if k:find('^tts') then package.loaded[k] = nil end
+end
+
+local tts_test_root = vim.g.tts_test_root
+if tts_test_root == nil or tts_test_root == '' then
+  tts_test_root = vim.fn.getcwd()
+end
+package.path = tts_test_root .. "/lua/?.lua;" .. tts_test_root .. "/lua/?/init.lua;" .. package.path
+
+local cache_dir = vim.fn.tempname()
+require('tts.config').setup({ cache = { directory = cache_dir, cleanup_on_start = false } })
+
+local openai = require('tts.backends.openai')
+local player = require('tts.player')
+local cache = require('tts.cache')
+
+local passed = 0
+local failed = 0
+
+local function check(name, ok, detail)
+  if ok then
+    passed = passed + 1
+    print(string.format("PASS: %s", name))
+  else
+    failed = failed + 1
+    print(string.format("FAIL: %s -- %s", name, detail or ''))
+  end
+end
+
+-- Mirrors openai.cache_key so expected cache paths can be asserted
+local function cache_path_for(text, voice)
+  local cfg = require('tts.config').get().openai
+  local key = cache.generate_key(text, {
+    backend = 'openai',
+    api_url = cfg.api_url,
+    model = cfg.model,
+    voice = voice or cfg.voice,
+    speed = cfg.speed,
+    format = cfg.format,
+  })
+  return cache.get_path(key, cfg.format)
+end
+
+-- Run scheduled callbacks inline so notification side effects are observable
+local real_notify = vim.notify
+local real_schedule = vim.schedule
+local real_defer_fn = vim.defer_fn
+local real_tempname = vim.fn.tempname
+local notify_count = 0
+vim.notify = function(msg, level)
+  notify_count = notify_count + 1
+end
+vim.schedule = function(fn)
+  fn()
+end
+vim.defer_fn = function(fn, ms)
+  fn()
+end
+
+-- Stub the curl job lifecycle: tempname yields a distinct per-request path,
+-- jobstart captures per-job callbacks and returns sequential ids, jobstop
+-- records ids and simulates the killed process's exit so the supersession
+-- branch is observable for exactly the job that was killed.
+local temp_base = real_tempname()
+local temp_files = {}
+local temp_counter = 0
+local temp_file = nil
+local job_next = 0
+local job_callbacks = {}
+local stopped_jobs = {}
+
+vim.fn.tempname = function()
+  temp_counter = temp_counter + 1
+  temp_file = temp_base .. '_' .. temp_counter .. '.mp3'
+  table.insert(temp_files, temp_file)
+  return temp_base .. '_' .. temp_counter
+end
+
+vim.fn.jobstart = function(cmd, opts)
+  job_next = job_next + 1
+  job_callbacks[job_next] = opts
+  return job_next
+end
+
+vim.fn.jobstop = function(job_id)
+  table.insert(stopped_jobs, job_id)
+  if job_callbacks[job_id] and job_callbacks[job_id].on_exit then
+    job_callbacks[job_id].on_exit(job_id, 143)
+  end
+  return 0
+end
+
+-- Capture what player.play receives and count player.stop calls
+local player_plays = {}
+local player_stops = 0
+player.play = function(file, opts)
+  table.insert(player_plays, { file = file, opts = opts })
+  return { stop = function() end }
+end
+player.stop = function()
+  player_stops = player_stops + 1
+end
+
+local function plays_text()
+  local parts = {}
+  for i, p in ipairs(player_plays) do
+    parts[i] = p.file
+  end
+  return table.concat(parts, ' | ')
+end
+
+print("Testing OpenAI backend completion, supersession and cache")
+print("=" .. string.rep("=", 60))
+
+-- The assertion body is pcall-wrapped so a Lua error inside the module under
+-- test surfaces as a failure (cquit 1) instead of aborting with exit 0.
+local body_ok, body_err = pcall(function()
+
+-- speak returns a handle table with stop, never a bare number
+local completed1 = 0
+local handle1 = openai.speak("One.", { on_complete = function() completed1 = completed1 + 1 end })
+local handle1_ok = type(handle1) == 'table'
+check("speak returns a handle table", handle1_ok, type(handle1))
+check("handle exposes stop", handle1_ok and type(handle1.stop) == 'function', handle1_ok and type(handle1.stop) or 'no handle')
+check("handle is not a bare number", type(handle1) ~= 'number', type(handle1))
+check("a miss runs jobstart once", job_next == 1, "job_next=" .. job_next)
+
+-- A second speak supersedes the first: it cancels the in-flight curl job and
+-- the killed response is dropped before it can play or notify
+local notify_before = notify_count
+local completed2 = 0
+openai.speak("Two.", { on_complete = function() completed2 = completed2 + 1 end })
+check("second speak cancels first request", #stopped_jobs == 1 and stopped_jobs[1] == 1, "stopped=" .. table.concat(stopped_jobs, ','))
+check("superseding speak does not notify", notify_count == notify_before, "notify_count=" .. notify_count)
+check("no playback before a request completes", #player_plays == 0, plays_text())
+check("a second miss runs jobstart once", job_next == 2, "job_next=" .. job_next)
+
+-- Completing the current request routes to player.play with the queue callback
+-- intact; the played file is the cache entry, not the temp file
+local two_cache = cache_path_for("Two.")
+vim.fn.writefile({ 'audio-bytes-not-json' }, temp_file)
+check("stubbed audio file is readable", vim.fn.filereadable(temp_file) == 1)
+
+job_callbacks[2].on_exit(2, 0)
+check("successful request reaches player.play", #player_plays == 1, plays_text())
+check("player receives the cache path", player_plays[1] and player_plays[1].file == two_cache, player_plays[1] and player_plays[1].file or 'nil')
+check("cache entry exists after a miss completes", two_cache ~= nil and vim.fn.filereadable(two_cache) == 1, two_cache or 'nil')
+check("temp file is gone after a miss completes", vim.fn.filereadable(temp_file) == 0, 'temp still present')
+check("player options carry the queue callback", type(player_plays[1].opts.on_complete) == 'function', 'on_complete missing')
+check("on_complete not fired before playback ends", completed2 == 0, "completed2=" .. completed2)
+
+-- Firing the player's completion callback invokes the caller's on_complete
+player_plays[1].opts.on_complete(0)
+check("player completion invokes caller on_complete", completed2 == 1, "completed2=" .. completed2)
+check("completing a cached play keeps the cache entry", vim.fn.filereadable(two_cache) == 1, 'cache entry deleted')
+
+-- A response from the superseded first request arriving later is dropped
+local notify_before_stale = notify_count
+local plays_before_stale = #player_plays
+job_callbacks[1].on_exit(1, 143)
+check("stale on_exit does not play", #player_plays == plays_before_stale, plays_text())
+check("stale on_exit does not notify", notify_count == notify_before_stale, "notify_count=" .. notify_count)
+
+-- Replaying the same text hits the cache: zero curl calls, instant playback
+local jobs_before_hit = job_next
+local plays_before_hit = #player_plays
+local completed_hit = 0
+local handle_hit = openai.speak("Two.", { on_complete = function() completed_hit = completed_hit + 1 end })
+check("cache hit returns a handle table", type(handle_hit) == 'table', type(handle_hit))
+check("cache hit performs zero jobstart calls", job_next == jobs_before_hit, "job_next=" .. job_next)
+check("cache hit plays immediately", #player_plays == plays_before_hit + 1, plays_text())
+check("cache hit plays the cache path", player_plays[#player_plays].file == two_cache, player_plays[#player_plays].file)
+player_plays[#player_plays].opts.on_complete(0)
+check("cache hit completion fires the caller callback", completed_hit == 1, "completed_hit=" .. completed_hit)
+check("cache hit completion keeps the cache entry", vim.fn.filereadable(two_cache) == 1, 'cache entry deleted')
+
+-- A player failure on a cached file must not delete the cache entry
+local play_backup = player.play
+player.play = function() return nil end
+openai.speak("Two.", { on_complete = function() end })
+check("failed playback keeps the cache entry", vim.fn.filereadable(two_cache) == 1, 'cache entry deleted')
+player.play = play_backup
+
+-- A voice change produces a different key, so the request is synthesized again
+require('tts.config').setup({
+  openai = { voice = 'nova' },
+  cache = { directory = cache_dir, cleanup_on_start = false },
+})
+local two_nova_cache = cache_path_for("Two.", 'nova')
+local jobs_before_voice = job_next
+openai.speak("Two.", { on_complete = function() end })
+check("voice change misses the cache", job_next == jobs_before_voice + 1, "job_next=" .. job_next)
+vim.fn.writefile({ 'audio-bytes-not-json' }, temp_file)
+job_callbacks[job_next].on_exit(job_next, 0)
+check("voice-changed request plays its own cache path", player_plays[#player_plays].file == two_nova_cache, player_plays[#player_plays].file)
+check("voice-changed request does not reuse the alloy entry", player_plays[#player_plays].file ~= two_cache, player_plays[#player_plays].file)
+require('tts.config').setup({
+  openai = { voice = 'alloy' },
+  cache = { directory = cache_dir, cleanup_on_start = false },
+})
+
+-- M.stop() cancels the in-flight request and silences the player
+local three_job = job_next + 1
+openai.speak("Three.", { on_complete = function() end })
+local stops_before = player_stops
+openai.stop()
+check("stop cancels the in-flight request", #stopped_jobs == 2 and stopped_jobs[2] == three_job, "stopped=" .. table.concat(stopped_jobs, ','))
+check("stop silences the player", player_stops == stops_before + 1, "player_stops=" .. player_stops)
+
+-- The killed request's exit arrives after stop: still dropped silently
+local notify_before_kill = notify_count
+local plays_before_kill = #player_plays
+job_callbacks[three_job].on_exit(three_job, 143)
+check("killed request does not play", #player_plays == plays_before_kill, plays_text())
+check("killed request does not notify", notify_count == notify_before_kill, "notify_count=" .. notify_count)
+
+-- The returned handle's stop behaves identically
+local four_job = job_next + 1
+openai.speak("Four.", { on_complete = function() end })
+local stops_before_handle = player_stops
+if handle1_ok then
+  handle1.stop()
+end
+check("handle.stop cancels the in-flight request", #stopped_jobs == 3 and stopped_jobs[3] == four_job, "stopped=" .. table.concat(stopped_jobs, ','))
+check("handle.stop silences the player", player_stops == stops_before_handle + 1, "player_stops=" .. player_stops)
+
+-- Positive control: a failed current request still notifies, proving the
+-- "does not notify" assertions above are not vacuous
+local five_job = job_next + 1
+openai.speak("Five.", { on_complete = function() end })
+local notify_before_err = notify_count
+job_callbacks[five_job].on_stderr(five_job, { 'boom' })
+job_callbacks[five_job].on_exit(five_job, 1)
+check("failed request notifies an API error", notify_count == notify_before_err + 1, "notify_count=" .. notify_count)
+check("failed request does not play", #player_plays == plays_before_kill, plays_text())
+
+-- A failed spawn returns nil rather than a truthy job id
+local jobstart_backup = vim.fn.jobstart
+vim.fn.jobstart = function() return 0 end
+local failed_handle = openai.speak("Six.", { on_complete = function() end })
+check("failed spawn returns nil", failed_handle == nil, type(failed_handle))
+vim.fn.jobstart = jobstart_backup
+
+-- A successful stale response from a superseded request is dropped without
+-- clobbering the newer request's slot, and the fresh segment still plays.
+-- The stale record's file must exist when its exit runs, otherwise the play
+-- assertions would pass for the wrong reason (filereadable guard).
+local stale_job = job_next + 1
+local fresh_job = stale_job + 1
+local fresh_completed = 0
+openai.speak("Stale.", { on_complete = function() end })
+openai.speak("Fresh.", { on_complete = function() fresh_completed = fresh_completed + 1 end })
+local stale_path = temp_files[#temp_files - 1]
+local plays_before_stale_ok = #player_plays
+local notify_before_stale_ok = notify_count
+vim.fn.writefile({ 'audio-bytes-not-json' }, stale_path)
+job_callbacks[stale_job].on_exit(stale_job, 0)
+check("stale success neither plays", #player_plays == plays_before_stale_ok, plays_text())
+check("stale success neither notifies", notify_count == notify_before_stale_ok, "notify_count=" .. notify_count)
+vim.fn.writefile({ 'audio-bytes-not-json' }, temp_file)
+job_callbacks[fresh_job].on_exit(fresh_job, 0)
+check("fresh segment plays after a stale exit", #player_plays == plays_before_stale_ok + 1, plays_text())
+player_plays[#player_plays].opts.on_complete(0)
+check("fresh segment completes after a stale exit", fresh_completed == 1, "fresh_completed=" .. fresh_completed)
+
+-- Prefetch warms the cache without playing
+local jobs_before_prefetch = job_next
+local plays_before_prefetch = #player_plays
+openai.prefetch("Prefetch.", {})
+check("prefetch issues one request", job_next == jobs_before_prefetch + 1, "job_next=" .. job_next)
+check("prefetch never plays", #player_plays == plays_before_prefetch, plays_text())
+local prefetch_cache = cache_path_for("Prefetch.")
+check("prefetch has not cached before completion", vim.fn.filereadable(prefetch_cache) == 0, 'cached early')
+vim.fn.writefile({ 'audio-bytes-not-json' }, temp_file)
+job_callbacks[job_next].on_exit(job_next, 0)
+check("prefetch completion populates the cache", vim.fn.filereadable(prefetch_cache) == 1, prefetch_cache)
+check("prefetch completion still never plays", #player_plays == plays_before_prefetch, plays_text())
+
+-- A following speak of the same text plays from cache with no further request
+local jobs_before_prefetch_hit = job_next
+local completed_prefetch_hit = 0
+local handle_prefetch_hit = openai.speak("Prefetch.", { on_complete = function() completed_prefetch_hit = completed_prefetch_hit + 1 end })
+check("speak after prefetch performs zero jobstart", job_next == jobs_before_prefetch_hit, "job_next=" .. job_next)
+check("speak after prefetch returns a handle table", type(handle_prefetch_hit) == 'table', type(handle_prefetch_hit))
+check("speak after prefetch plays the cache path", player_plays[#player_plays].file == prefetch_cache, player_plays[#player_plays].file)
+player_plays[#player_plays].opts.on_complete(0)
+check("speak after prefetch fires the caller callback", completed_prefetch_hit == 1, "completed_prefetch_hit=" .. completed_prefetch_hit)
+check("speak after prefetch keeps the cache entry", vim.fn.filereadable(prefetch_cache) == 1, 'cache entry deleted')
+
+-- A prefetch supersedes another prefetch: the first is jobstopped and dropped
+local stops_before_alpha = #stopped_jobs
+local plays_before_alpha = #player_plays
+local notify_before_alpha = notify_count
+openai.prefetch("Alpha.", {})
+local alpha_job = job_next
+openai.prefetch("Beta.", {})
+check("second prefetch jobstops the first", #stopped_jobs == stops_before_alpha + 1 and stopped_jobs[#stopped_jobs] == alpha_job, "stopped=" .. table.concat(stopped_jobs, ','))
+check("second prefetch issues its own request", job_next == alpha_job + 1, "job_next=" .. job_next)
+check("superseded prefetch does not play", #player_plays == plays_before_alpha, plays_text())
+check("superseded prefetch does not notify", notify_count == notify_before_alpha, "notify_count=" .. notify_count)
+
+-- speak adopts an in-flight prefetch of the same text: no second request, and
+-- the warmed audio plays when the adopted request completes
+openai.prefetch("Adopt.", {})
+local adopt_job = job_next
+local plays_before_adopt = #player_plays
+local stops_before_adopt = #stopped_jobs
+local completed_adopt = 0
+local handle_adopt = openai.speak("Adopt.", { on_complete = function() completed_adopt = completed_adopt + 1 end })
+check("adoption returns a handle table", type(handle_adopt) == 'table', type(handle_adopt))
+check("adoption issues no second request", job_next == adopt_job, "job_next=" .. job_next)
+check("adoption does not stop the adopted request", #stopped_jobs == stops_before_adopt, "stopped=" .. table.concat(stopped_jobs, ','))
+check("adoption does not play before completion", #player_plays == plays_before_adopt, plays_text())
+local adopt_cache = cache_path_for("Adopt.")
+vim.fn.writefile({ 'audio-bytes-not-json' }, temp_file)
+job_callbacks[adopt_job].on_exit(adopt_job, 0)
+check("adopted request plays when it completes", #player_plays == plays_before_adopt + 1, plays_text())
+check("adopted request plays the cache path", player_plays[#player_plays].file == adopt_cache, player_plays[#player_plays].file)
+player_plays[#player_plays].opts.on_complete(0)
+check("adopted request fires the caller callback", completed_adopt == 1, "completed_adopt=" .. completed_adopt)
+
+-- Empty text, an identical in-flight prefetch, and a failed spawn never start
+-- a second request
+local jobs_before_guards = job_next
+openai.prefetch("", {})
+openai.prefetch("   ", {})
+check("empty text prefetches nothing", job_next == jobs_before_guards, "job_next=" .. job_next)
+openai.prefetch("Once.", {})
+local once_job = job_next
+openai.prefetch("Once.", {})
+check("identical in-flight prefetch issues no second request", job_next == once_job, "job_next=" .. job_next)
+vim.fn.jobstart = function() return 0 end
+openai.prefetch("FailPrefetch.", {})
+vim.fn.jobstart = jobstart_backup
+local jobs_before_retry = job_next
+openai.prefetch("FailPrefetch.", {})
+check("failed prefetch spawn retries on the next call", job_next == jobs_before_retry + 1, "job_next=" .. job_next)
+
+-- a prefetch of text the current segment is already synthesizing issues no
+-- second request for the same key
+openai.speak("Same.", { on_complete = function() end })
+local jobs_before_same = job_next
+openai.prefetch("Same.", {})
+check("prefetch of in-flight speak text issues no request", job_next == jobs_before_same, "job_next=" .. job_next)
+
+-- cache.prefetch_next = false and cache.enabled = false disable warm-up entirely
+require('tts.config').setup({ cache = { directory = cache_dir, cleanup_on_start = false, prefetch_next = false } })
+local jobs_before_off = job_next
+openai.prefetch("Skipped.", {})
+check("prefetch_next=false disables warm-up", job_next == jobs_before_off, "job_next=" .. job_next)
+require('tts.config').setup({ cache = { enabled = false, directory = cache_dir, cleanup_on_start = false, prefetch_next = true } })
+local jobs_before_off2 = job_next
+openai.prefetch("Skipped2.", {})
+check("cache.enabled=false disables warm-up", job_next == jobs_before_off2, "job_next=" .. job_next)
+require('tts.config').setup({ cache = { directory = cache_dir, cleanup_on_start = false, prefetch_next = true } })
+
+-- stop() cancels both the playback request and the prefetch slot
+local play_job = job_next + 1
+openai.speak("Play.", { on_complete = function() end })
+openai.prefetch("Warm.", {})
+local warm_job = job_next
+local stops_before_both = #stopped_jobs
+local plays_before_both = #player_plays
+local player_stops_before_both = player_stops
+openai.stop()
+check("stop cancels the playback request", #stopped_jobs >= stops_before_both + 2 and stopped_jobs[#stopped_jobs - 1] == play_job, "stopped=" .. table.concat(stopped_jobs, ','))
+check("stop cancels the prefetch request", #stopped_jobs >= stops_before_both + 2 and stopped_jobs[#stopped_jobs] == warm_job, "stopped=" .. table.concat(stopped_jobs, ','))
+check("stop silences the player", player_stops == player_stops_before_both + 1, "player_stops=" .. player_stops)
+check("stop cancelling emits no playback", #player_plays == plays_before_both, plays_text())
+
+-- stop({ keep_prefetch = true }) silences playback but preserves the warm-up,
+-- so a following speak can still adopt the in-flight prefetch instead of
+-- re-requesting the same text
+local keep_play_job = job_next + 1
+openai.speak("PlayKeep.", { on_complete = function() end })
+openai.prefetch("Warm2.", {})
+local warm2_job = job_next
+local stops_before_keep = #stopped_jobs
+local player_stops_before_keep = player_stops
+openai.stop({ keep_prefetch = true })
+check("keep_prefetch stop cancels the playback request",
+  #stopped_jobs == stops_before_keep + 1 and stopped_jobs[#stopped_jobs] == keep_play_job,
+  "stopped=" .. table.concat(stopped_jobs, ','))
+check("keep_prefetch stop preserves the prefetch job",
+  #stopped_jobs == stops_before_keep + 1,
+  "stopped=" .. table.concat(stopped_jobs, ','))
+check("keep_prefetch stop silences the player",
+  player_stops == player_stops_before_keep + 1,
+  "player_stops=" .. player_stops)
+
+local jobs_before_keep_adopt = job_next
+local plays_before_keep_adopt = #player_plays
+local completed_keep_adopt = 0
+local handle_keep = openai.speak("Warm2.", { on_complete = function() completed_keep_adopt = completed_keep_adopt + 1 end })
+check("speak after keep_prefetch stop adopts the warm-up", job_next == jobs_before_keep_adopt, "job_next=" .. job_next)
+check("adoption after keep_prefetch stop returns a handle table", type(handle_keep) == 'table', type(handle_keep))
+check("adoption after keep_prefetch stop does not play before completion", #player_plays == plays_before_keep_adopt, plays_text())
+local warm2_cache = cache_path_for("Warm2.")
+vim.fn.writefile({ 'audio-bytes-not-json' }, temp_file)
+job_callbacks[warm2_job].on_exit(warm2_job, 0)
+check("adopted warm-up plays when it completes", #player_plays == plays_before_keep_adopt + 1, plays_text())
+check("adopted warm-up plays the cache path", player_plays[#player_plays].file == warm2_cache, player_plays[#player_plays].file)
+player_plays[#player_plays].opts.on_complete(0)
+check("adopted warm-up fires the caller callback", completed_keep_adopt == 1, "completed_keep_adopt=" .. completed_keep_adopt)
+
+-- A cache entry evicted immediately by check_size falls back to the temp file
+-- so the segment still plays and the queue still advances
+cache.clear()
+require('tts.config').setup({ cache = { directory = cache_dir, max_size = 0.00001, cleanup_on_start = false } })
+local evict_job = job_next + 1
+local plays_before_evict = #player_plays
+local completed_evict = 0
+openai.speak("Evicted.", { on_complete = function() completed_evict = completed_evict + 1 end })
+check("eviction probe runs jobstart", job_next == evict_job, "job_next=" .. job_next)
+check("eviction probe does not play before completion", #player_plays == plays_before_evict, plays_text())
+vim.fn.writefile({ 'audio-bytes-not-json' }, temp_file)
+job_callbacks[evict_job].on_exit(evict_job, 0)
+check("evicted entry falls back to the temp file", player_plays[#player_plays] and player_plays[#player_plays].file == temp_file, player_plays[#player_plays] and player_plays[#player_plays].file or 'nil')
+check("evicted entry keeps the temp until playback ends", vim.fn.filereadable(temp_file) == 1, 'deleted early')
+player_plays[#player_plays].opts.on_complete(0)
+check("evicted entry still completes the caller callback", completed_evict == 1, "completed_evict=" .. completed_evict)
+
+-- With caching disabled every speak synthesizes and plays a temp file that is
+-- deleted only after playback ends
+require('tts.config').setup({ cache = { enabled = false, directory = cache_dir, cleanup_on_start = false } })
+local seven_job = job_next + 1
+local plays_before_nocache = #player_plays
+local completed_nocache = 0
+openai.speak("Seven.", { on_complete = function() completed_nocache = completed_nocache + 1 end })
+check("disabled cache still runs jobstart", job_next == seven_job, "job_next=" .. job_next)
+vim.fn.writefile({ 'audio-bytes-not-json' }, temp_file)
+check("temp audio file is readable before completion", vim.fn.filereadable(temp_file) == 1)
+job_callbacks[seven_job].on_exit(seven_job, 0)
+check("disabled cache plays the temp path", player_plays[#player_plays].file == temp_file, player_plays[#player_plays].file)
+check("disabled cache keeps the temp until playback ends", vim.fn.filereadable(temp_file) == 1, 'deleted early')
+player_plays[#player_plays].opts.on_complete(0)
+check("disabled cache deletes the temp after playback", vim.fn.filereadable(temp_file) == 0, 'still present')
+check("disabled cache completion fires the caller callback", completed_nocache == 1, "completed_nocache=" .. completed_nocache)
+
+-- A player failure on a temp file still deletes it
+player.play = function() return nil end
+openai.speak("Seven.", { on_complete = function() end })
+vim.fn.writefile({ 'audio-bytes-not-json' }, temp_file)
+job_callbacks[job_next].on_exit(job_next, 0)
+check("failed playback on a temp file deletes it", vim.fn.filereadable(temp_file) == 0, 'temp kept')
+player.play = play_backup
+
+end)
+
+for _, f in ipairs(temp_files) do
+  vim.fn.delete(f)
+end
+vim.fn.delete(cache_dir, 'rf')
+vim.fn.delete(vim.fn.fnamemodify(temp_base, ':h'), 'rf')
+
+vim.notify = real_notify
+vim.schedule = real_schedule
+vim.defer_fn = real_defer_fn
+vim.fn.tempname = real_tempname
+
+if not body_ok then
+  failed = failed + 1
+  print(string.format("FAIL: openai playback test body errored -- %s", tostring(body_err)))
+end
+
+print("=" .. string.rep("=", 60))
+print(string.format("Results: %d passed, %d failed", passed, failed))
+
+if failed > 0 then
+  vim.cmd('cquit 1')
+end
+EOF

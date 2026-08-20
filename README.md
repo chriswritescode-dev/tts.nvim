@@ -19,11 +19,12 @@ require('tts').setup({
 ## Features
 
 - **Multi-backend Support**: Native macOS `say` command and OpenAI API
-- **Smart Text Selection**: Visual mode, line/paragraph, and motion-based selection
+- **Smart Text Selection**: Visual mode, line/paragraph/section/buffer, and motion-based selection
 - **Intelligent Content Filtering**: Removes paths, URLs, and technical content for better TTS
 - **Playback Control**: Play and stop with basic state management
-- **Queue Management**: Add multiple text segments to a queue for sequential playback
-- **Audio Caching**: Reduces API calls and improves response time
+- **Segment Playback**: A selection is split into segments and played in order, with next/prev navigation between them. In `line` mode a segment is a group of `lines_per_segment` lines (5 by default), so next/prev jumps a whole group rather than a single line
+- **Segment Following**: When playing from a buffer, the cursor jumps to the current segment and its lines are highlighted with the `TTSSegment` group (linked to `Visual` by default). Disable with `playback.follow = false`
+- **Audio Caching**: The OpenAI-compatible backend caches each segment's audio (keyed by text, endpoint, model, voice, speed and format), so replaying a segment costs no HTTP request
 - **Text Preprocessing**: Clean code comments, expand abbreviations, language-specific replacements
 
 - **Customizable**: Extensive configuration options, hooks, and keymaps
@@ -71,11 +72,14 @@ Using [lazy.nvim](https://github.com/folke/lazy.nvim):
       playback = {
         auto_clear_queue = false,
         show_progress = true,
-        chunk_size = 500,                    -- Text chunk size for processing
-        pause_between_chunks = 0.5,          -- Pause between chunks (seconds)
+        segmentation = 'line',               -- Split text into segments: 'line', 'sentence', or 'none'
+        lines_per_segment = 5,               -- 'line' mode only: how many lines make up one segment
+        chunk_size = 500,                    -- Max segment length before a segment is split further ('sentence' mode only)
+        pause_between_chunks = 0,            -- Delay between segments on natural advance only (seconds)
         player = 'auto',                     -- Audio player: 'auto', 'mpv', 'ffplay', etc.
         player_args = {},                    -- Custom player arguments
-        default_selection = 'section',       -- Default text selection: 'line', 'paragraph', 'section'
+        default_selection = 'buffer',       -- Default text selection: 'line', 'paragraph', 'section', 'buffer'
+        follow = true,                       -- Move the cursor to the playing segment and highlight its lines
       },
 
       -- Cache settings
@@ -85,6 +89,7 @@ Using [lazy.nvim](https://github.com/folke/lazy.nvim):
         max_size = 100,          -- MB
         max_age = 7,             -- days
         cleanup_on_start = true,
+        prefetch_next = true,    -- Warm the next segment while the current one plays
       },
 
       -- Custom keymaps
@@ -160,12 +165,12 @@ Using [lazy.nvim](https://github.com/folke/lazy.nvim):
       -- Hooks
       hooks = {
         before_play = nil,              -- function(text) return modified_text end
-        after_play = nil,               -- function(text) end
+        after_play = nil,               -- function(text) end; fires once when the whole run finishes
         on_state_change = nil,          -- function(new_state, old_state) end
         on_error = function(err)
           vim.notify('TTS Error: ' .. err, vim.log.levels.ERROR)
         end,
-        on_queue_item = nil,            -- function(item, index, total) end
+        on_queue_item = nil,            -- function(item, index, total) end; fires per segment
       },
 
       -- Notifications
@@ -177,6 +182,8 @@ Using [lazy.nvim](https://github.com/folke/lazy.nvim):
   end
 }
 ```
+
+Cached audio files live in `cache.directory` (default `vim.fn.stdpath('cache') .. '/tts'`), one file per segment named `<sha256>.<format>`, alongside an `index.json` manifest. When `cache.cleanup_on_start` is true, entries older than `cache.max_age` days are deleted on the next startup sweep, and the total size is capped at `cache.max_size` MB with least-recently-used eviction. `:TTSClearCache` (`tts.clear_cache()`) empties the cache immediately, and `tts.get_cache_stats()` reports size, file count and hits. Setting `cache.enabled = false` disables storage entirely and falls back to per-play temp files.
 
 Using [packer.nvim](https://github.com/wbthomason/packer.nvim):
 
@@ -223,13 +230,13 @@ require('tts').setup({
 ### Commands
 
 - `:TTS [text]` - Speak the provided text or current selection
-- `:TTSPlay` - Play current selection/line/paragraph
+- `:TTSPlay` - Play current selection, or the whole file when nothing is selected
 - `:TTSStop` - Stop current playback
 
-- `:TTSQueue [text]` - Add text to queue or show queue
+- `:TTSQueue [text]` - Append extra text to the current run, or show the queue when called without text
 - `:TTSClear` - Clear the queue
-- `:TTSNext` - Skip to next in queue
-- `:TTSPrev` - Go to previous in queue
+- `:TTSNext` - Skip to the next segment (accepts a count, e.g. `:3TTSNext`)
+- `:TTSPrev` - Go to the previous segment (accepts a count, e.g. `:3TTSPrev`)
 - `:TTSBackend <name>` - Switch backend (macos/openai)
 - `:TTSVoices` - List available voices
 - `:TTSSetVoice <voice>` - Set voice for current backend
@@ -238,13 +245,13 @@ require('tts').setup({
 
 ### Default Keymaps
 
-- `<leader>tp` - Play selection/current text
+- `<leader>tp` - Play selection, or the whole file when nothing is selected
 - `<leader>ts` - Stop playback
 
 - `<leader>tq` - Add to queue / show queue
 - `<leader>tc` - Clear queue
-- `<leader>tn` - Next in queue
-- `<leader>tN` - Previous in queue
+- `<leader>tn` - Skip N segments forward (`3<leader>tn` jumps 3 segments)
+- `<leader>tN` - Skip N segments back (`3<leader>tN` jumps back 3 segments)
 
 ### Usage Examples
 
@@ -280,16 +287,15 @@ require('tts').setup({
 #### Queue Management
 
 ```vim
-" Add multiple items to queue
+" Play the current selection as a new run (replaces any previous run)
+:TTSPlay
+
+" Append extra text to the current run; starts playing when idle
 :TTSQueue First paragraph
 :TTSQueue Second paragraph
-:TTSQueue Third paragraph
 
-" Show queue
+" Show the queue
 :TTSQueue
-
-" Process queue
-:TTSPlay
 ```
 
 ## Advanced Features
@@ -357,6 +363,7 @@ Uses the built-in `say` command:
 - No API key needed
 - Multiple system voices available
 - Fast, local processing
+- Caching and prefetching are inert: audio is synthesized locally by `say`, so nothing is stored on disk or warmed ahead
 
 #### OpenAI-Compatible Backend
 
@@ -365,8 +372,15 @@ Uses OpenAI-compatible TTS API (official OpenAI, Kokoro FastAPI, etc.):
 - API key required for official OpenAI, optional for self-hosted services
 - High-quality voices (varies by service)
 - Multiple voice options (alloy, echo, fable, onyx, nova, shimmer for OpenAI)
-- Audio caching to reduce API calls
+- Audio caching: each segment's audio is cached, keyed by text plus endpoint, model, voice, speed and format, so replaying a segment costs no HTTP request
 - Supports custom endpoints and self-hosted services
+
+### User Autocmds
+
+The plugin fires `User` autocmds you can listen to with `vim.api.nvim_create_autocmd('User', { pattern = ..., callback = ... })`:
+
+- `TTSPlayStart` / `TTSPlayEnd` fire once **per segment** — the current text and backend are passed as `data` on start, the backend name on end. `TTSPlayEnd` fires only on successful completion: failed starts (missing audio player, synthesis or API error, unreadable audio) and explicit stops do not produce a matching `TTSPlayEnd`.
+- `TTSQueueUpdate` fires for run-level UI: its `data` carries `action` (`set`, `add`, `play`, `stop`, `finish`, `clear`, `remove`) plus `index` and `count` when relevant (a `play` event includes both).
 
 ### API Reference
 

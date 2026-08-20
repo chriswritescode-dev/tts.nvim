@@ -59,13 +59,13 @@ function M._setup_commands()
     M.queue_clear()
   end, {})
   
-  vim.api.nvim_create_user_command('TTSNext', function()
-    M.queue_next()
-  end, {})
+  vim.api.nvim_create_user_command('TTSNext', function(cmd)
+    M.queue_next(math.max(cmd.count, vim.v.count1))
+  end, { count = true })
   
-  vim.api.nvim_create_user_command('TTSPrev', function()
-    M.queue_prev()
-  end, {})
+  vim.api.nvim_create_user_command('TTSPrev', function(cmd)
+    M.queue_prev(math.max(cmd.count, vim.v.count1))
+  end, { count = true })
   
   vim.api.nvim_create_user_command('TTSBackend', function(cmd)
     M.set_backend(cmd.args)
@@ -126,12 +126,41 @@ function M._setup_keymaps()
   end
   
   if keymaps.next then
-    map('n', keymaps.next, '<cmd>TTSNext<cr>', { desc = 'TTS: Next in queue' })
+    map('n', keymaps.next, '<cmd>TTSNext<cr>', { desc = 'TTS: Skip N segments forward' })
   end
   
   if keymaps.prev then
-    map('n', keymaps.prev, '<cmd>TTSPrev<cr>', { desc = 'TTS: Previous in queue' })
+    map('n', keymaps.prev, '<cmd>TTSPrev<cr>', { desc = 'TTS: Skip N segments back' })
   end
+end
+
+local function apply_before_play(text)
+  local hooks = require('tts.config').get().hooks
+  if hooks and hooks.before_play then
+    return hooks.before_play(text)
+  end
+  return nil
+end
+
+function M._prepare_segments(text, skip_before_play)
+  local utils = require('tts.utils')
+  text = utils.preprocess_text(text)
+
+  if not text or text == '' then
+    return {}
+  end
+
+  local segments = utils.split_segments(text)
+  if #segments == 0 or skip_before_play then
+    return segments
+  end
+
+  local modified = apply_before_play(text)
+  if modified then
+    return utils.split_segments(modified)
+  end
+
+  return segments
 end
 
 function M.play(text, opts)
@@ -141,38 +170,64 @@ function M.play(text, opts)
     return
   end
 
-  local utils = require('tts.utils')
-  local config = require('tts.config').get()
-
-  local original_text = text
-  text = utils.preprocess_text(original_text)
-
-  if not text or text == '' then
-    vim.notify('Text became empty after preprocessing', vim.log.levels.WARN)
+  local segments = M._prepare_segments(text)
+  if #segments == 0 then
+    vim.notify('Text produced no speakable segments', vim.log.levels.WARN)
     return
   end
 
-  local hooks = config.hooks
-  if hooks and hooks.before_play then
-    local modified = hooks.before_play(text)
+  require('tts.queue').set_segments(segments, { opts = opts, original_text = text })
+end
+
+function M.play_lines(first, last, opts)
+  local bufnr = vim.api.nvim_get_current_buf()
+  local lines = vim.api.nvim_buf_get_lines(bufnr, first - 1, last, false)
+
+  if #lines == 0 then
+    vim.notify('No text selected', vim.log.levels.WARN)
+    return
+  end
+
+  local utils = require('tts.utils')
+  local raw = table.concat(lines, '\n')
+  local prepared = utils.preprocess_text(raw)
+
+  if prepared and prepared ~= '' and #utils.split_segments(prepared) > 0 then
+    local modified = apply_before_play(prepared)
     if modified then
-      text = modified
+      local pieces = utils.split_segments(modified)
+      if #pieces == 0 then
+        vim.notify('Text produced no speakable segments', vim.log.levels.WARN)
+        return
+      end
+      require('tts.queue').set_segments(pieces, { opts = opts or {}, original_text = raw })
+      return
     end
   end
 
-  local backends = require('tts.backends')
-  backends.speak(text, opts)
-
-  if hooks and hooks.after_play then
-    vim.defer_fn(function()
-      hooks.after_play(original_text)
-    end, 100)
+  local segments = {}
+  for _, group in ipairs(utils.group_source_lines(lines, first)) do
+    for _, piece in ipairs(M._prepare_segments(group.text, true)) do
+      table.insert(segments, {
+        text = piece,
+        range = { bufnr = bufnr, first = group.first, last = group.last },
+      })
+    end
   end
+
+  if #segments == 0 then
+    vim.notify('Text produced no speakable segments', vim.log.levels.WARN)
+    return
+  end
+
+  require('tts.queue').set_segments(segments, {
+    opts = opts or {},
+    original_text = table.concat(lines, '\n'),
+  })
 end
 
 function M.play_range(line1, line2)
-  local lines = vim.api.nvim_buf_get_lines(0, line1 - 1, line2, false)
-  M.play(table.concat(lines, '\n'))
+  M.play_lines(line1, line2)
 end
 
 function M.play_selection()
@@ -182,33 +237,52 @@ function M.play_selection()
 
   local selection = require('tts.selection')
   local mode = vim.fn.mode()
-  local text
 
   if mode == 'v' or mode == 'V' or mode == '\22' then
-    vim.cmd('normal! "vy')
-    text = vim.fn.getreg('v')
-  elseif vim.fn.visualmode() ~= '' then
-    text = selection.get_visual()
-  else
-    local config = require('tts.config').get()
-    if config.playback and config.playback.default_selection == 'line' then
-      text = selection.get_line()
-    elseif config.playback and config.playback.default_selection == 'section' then
-      text = selection.get_section()
-    else
-      text = selection.get_paragraph()
-    end
-  end
+    local saved_v = vim.fn.getreginfo('v')
+    local saved_unnamed = vim.fn.getreginfo('"')
 
-  if text and text ~= '' then
-    M.play(text)
-  else
-    text = selection.get_line()
-    if text and text ~= '' then
-      M.play(text)
+    vim.cmd('normal! "vy')
+    local selected = vim.fn.getreg('v')
+
+    vim.fn.setreg('v', saved_v)
+    vim.fn.setreg('"', saved_unnamed)
+
+    if selected and selected ~= '' then
+      M.play(selected)
     else
       vim.notify('No text selected', vim.log.levels.WARN)
     end
+    return
+  end
+
+  local config = require('tts.config').get()
+  local default = config.playback and config.playback.default_selection
+  local text, range
+
+  if default == 'line' then
+    text, range = selection.get_line()
+  elseif default == 'section' then
+    text, range = selection.get_section()
+  elseif default == 'buffer' then
+    text, range = selection.get_buffer()
+  else
+    text, range = selection.get_paragraph()
+  end
+
+  if not text or text == '' then
+    text, range = selection.get_line()
+  end
+
+  if not text or text == '' then
+    vim.notify('No text selected', vim.log.levels.WARN)
+    return
+  end
+
+  if range then
+    M.play_lines(range.first, range.last)
+  else
+    M.play(text)
   end
 end
 
@@ -222,8 +296,7 @@ function M.play_motion(motion)
 end
 
 function M.stop()
-  local backends = require('tts.backends')
-  backends.stop()
+  require('tts.queue').stop()
 end
 
 function M.queue_add(text)
@@ -239,8 +312,10 @@ function M.queue_add(text)
   end
   
   if text and text ~= '' then
-    local queue = require('tts.queue')
-    queue.add(text)
+    local segments = M._prepare_segments(text)
+    if #segments > 0 then
+      require('tts.queue').append(segments, { original_text = text })
+    end
     -- Silent add - no notification needed
   end
 end
@@ -264,18 +339,18 @@ function M.queue_list()
   for _, item in ipairs(items) do
     table.insert(lines, item.display)
   end
-  
-  vim.notify(table.concat(lines, '\n'), vim.log.levels.INFO)
+
+  require('tts.utils').echo_lines(lines)
 end
 
-function M.queue_next()
+function M.queue_next(count)
   local queue = require('tts.queue')
-  queue.skip()
+  queue.skip(count)
 end
 
-function M.queue_prev()
+function M.queue_prev(count)
   local queue = require('tts.queue')
-  queue.previous()
+  queue.previous(count)
 end
 
 function M.set_backend(name)
@@ -306,8 +381,8 @@ function M.list_voices()
     end
     table.insert(lines, line)
   end
-  
-  vim.notify(table.concat(lines, '\n'), vim.log.levels.INFO)
+
+  require('tts.utils').echo_lines(lines)
 end
 
 function M.set_voice(voice)

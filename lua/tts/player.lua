@@ -1,6 +1,7 @@
 local M = {}
 local current_job = nil
 local current_player = nil
+local job_token = 0
 
 local function detect_player()
 	local config = require('tts.config').get().playback
@@ -22,6 +23,55 @@ local function detect_player()
 	return nil
 end
 
+local function spawn(player, args, opts)
+	job_token = job_token + 1
+	local token = job_token
+	current_player = player
+
+	local handle
+	handle = vim.loop.spawn(player, {
+		args = args
+	}, function(code)
+		if handle and not handle:is_closing() then
+			handle:close()
+		end
+
+		if token ~= job_token then
+			return
+		end
+
+		current_job = nil
+
+		vim.schedule(function()
+			require('tts.state').transition('idle')
+
+			if code ~= 0 then
+				vim.notify(
+					string.format('TTS: player %s exited with code %d', tostring(player), code),
+					vim.log.levels.WARN
+				)
+			end
+
+			if opts.on_complete then
+				opts.on_complete(code)
+			end
+		end)
+	end)
+
+	if not handle then
+		vim.notify('TTS: failed to start player ' .. tostring(player), vim.log.levels.ERROR)
+		return nil
+	end
+
+	current_job = handle
+
+	return {
+		stop = function()
+			M.stop()
+		end
+	}
+end
+
 function M.play(audio_source, opts)
 	opts = opts or {}
 	local state = require('tts.state')
@@ -35,8 +85,6 @@ function M.play(audio_source, opts)
 		vim.notify('No audio player found', vim.log.levels.ERROR)
 		return nil
 	end
-
-	current_player = player
 
 	if player == 'afplay' then
 		return M._play_with_afplay(audio_source, opts)
@@ -57,26 +105,7 @@ function M._play_with_afplay(file, opts)
 		table.insert(args, tostring(opts.volume))
 	end
 
-	current_job = vim.loop.spawn('afplay', {
-		args = args
-	}, function(code)
-		current_job = nil
-		vim.schedule(function()
-			if code == 0 then
-				local state = require('tts.state')
-				state.transition('idle')
-			end
-			if opts.on_complete then
-				opts.on_complete(code)
-			end
-		end)
-	end)
-
-	return {
-		stop = function()
-			M.stop()
-		end
-	}
+	return spawn('afplay', args, opts)
 end
 
 function M._play_with_mpv(file, opts)
@@ -96,26 +125,7 @@ function M._play_with_mpv(file, opts)
 
 	table.insert(args, file)
 
-	current_job = vim.loop.spawn('mpv', {
-		args = args
-	}, function(code)
-		current_job = nil
-		vim.schedule(function()
-			if code == 0 then
-				local state = require('tts.state')
-				state.transition('idle')
-			end
-			if opts.on_complete then
-				opts.on_complete(code)
-			end
-		end)
-	end)
-
-	return {
-		stop = function()
-			M.stop()
-		end
-	}
+	return spawn('mpv', args, opts)
 end
 
 function M._play_with_ffplay(file, opts)
@@ -132,26 +142,7 @@ function M._play_with_ffplay(file, opts)
 
 	table.insert(args, file)
 
-	current_job = vim.loop.spawn('ffplay', {
-		args = args
-	}, function(code)
-		current_job = nil
-		vim.schedule(function()
-			if code == 0 then
-				local state = require('tts.state')
-				state.transition('idle')
-			end
-			if opts.on_complete then
-				opts.on_complete(code)
-			end
-		end)
-	end)
-
-	return {
-		stop = function()
-			M.stop()
-		end
-	}
+	return spawn('ffplay', args, opts)
 end
 
 function M._play_with_sox(file, opts)
@@ -162,31 +153,14 @@ function M._play_with_sox(file, opts)
 		table.insert(args, tostring(opts.volume))
 	end
 
-	current_job = vim.loop.spawn('play', {
-		args = args
-	}, function(code)
-		current_job = nil
-		vim.schedule(function()
-			if code == 0 then
-				local state = require('tts.state')
-				state.transition('idle')
-			end
-			if opts.on_complete then
-				opts.on_complete(code)
-			end
-		end)
-	end)
-
-	return {
-		stop = function()
-			M.stop()
-		end
-	}
+	return spawn('play', args, opts)
 end
 
 
 
 function M.stop()
+	job_token = job_token + 1
+
 	if current_job then
 		if not current_job:is_closing() then
 			current_job:kill('sigterm')

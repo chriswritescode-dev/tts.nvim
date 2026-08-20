@@ -1,7 +1,21 @@
 " Test single-line list pause handling
+let g:tts_test_root = expand('<sfile>:p:h:h')
 lua << EOF
--- Add development directory to path
-package.path = "/Users/chris/development/tts.nvim/lua/?.lua;" .. package.path
+-- Clear any cached tts modules so source changes take effect
+for k in pairs(package.loaded) do
+  if k:find('^tts') then package.loaded[k] = nil end
+end
+
+-- Add repo lua directory to path
+local tts_test_root = vim.g.tts_test_root
+if tts_test_root == nil or tts_test_root == '' then
+  tts_test_root = vim.fn.getcwd()
+end
+package.path = tts_test_root .. "/lua/?.lua;" .. package.path
+
+-- Initialize config with defaults so clean_markdown_text works
+require('tts.config').setup({})
+
 local utils = require('tts.utils')
 
 -- Test cases for single-line list items
@@ -35,19 +49,39 @@ local test_cases = {
     name = "Edge case - numbers not as list markers",
     input = "The version 2.0 is better than 1.0 for sure",
     expected = "The version 2.0 is better than 1.0 for sure"
+  },
+  {
+    name = "Line ending in a number keeps its number and newline",
+    input = "Line 1.\nLine 2.\nLine 3.",
+    expected = "Line 1.\nLine 2.\nLine 3."
+  },
+  {
+    name = "Trailing number before a newline is not a list marker",
+    input = "See chapter 1.\nThe next line.",
+    expected = "See chapter 1.\nThe next line."
+  },
+  {
+    name = "Trailing dash before a newline is not a list marker",
+    input = "Some text -\nNext line here",
+    expected = "Some text -\nNext line here"
   }
 }
 
 print("Testing single-line list pause handling...")
 print("=" .. string.rep("=", 60))
 
+local passed = 0
+local failed = 0
+
 for i, test in ipairs(test_cases) do
   local result = utils.clean_markdown_text(test.input)
   local success = result == test.expected
   
   if success then
+    passed = passed + 1
     print(string.format("✅ Test %d: %s", i, test.name))
   else
+    failed = failed + 1
     print(string.format("❌ Test %d: %s", i, test.name))
     print("   Input:    " .. tostring(test.input):gsub("\n", "\\n"))
     print("   Expected: " .. tostring(test.expected):gsub("\n", "\\n"))
@@ -56,4 +90,9 @@ for i, test in ipairs(test_cases) do
 end
 
 print("=" .. string.rep("=", 60))
+print(string.format("Results: %d passed, %d failed", passed, failed))
+
+if failed > 0 then
+  vim.cmd('cquit 1')
+end
 EOF

@@ -79,7 +79,7 @@ function M.preprocess_text(text)
   -- Add periods at end of lines for natural pauses (before normalizing whitespace)
   if preprocessing.add_line_breaks then
     -- Add period at end of lines that don't already end with punctuation
-    text = text:gsub('([^%.!?:,;])%s*\n', '%1. ')
+    text = text:gsub('([^%.!?:,;])[ \t]*\n', '%1.\n')
   end
   
   -- Strip problematic characters that TTS engines struggle with
@@ -87,8 +87,11 @@ function M.preprocess_text(text)
   text = text:gsub('/', '')
 
   -- Final cleanup
-  text = text:gsub('%s+', ' ')  -- Normalize whitespace
+  text = text:gsub('[ \t\r]+', ' ')  -- Normalize whitespace (preserve newlines)
+  text = text:gsub(' *\n *', '\n')  -- Trim spaces around newlines
+  text = text:gsub('\n+', '\n')  -- Collapse blank lines
   text = text:gsub('^%s*[%-%*%+]%s+', '')  -- Remove leading list markers
+  text = text:gsub('\n%s*[%-%*%+]%s+', '\n')  -- Remove list markers on later lines
   text = text:gsub('%.%s*[%-%*%+]%s+', '. ')  -- Clean up ". -" to ". "
   text = vim.trim(text)
   
@@ -162,12 +165,12 @@ function M.clean_markdown_text(text)
   -- Remove list markers but add pauses between items for better speech flow
   text = text:gsub('^%s*[-*+]%s+', '')
   text = text:gsub('\n%s*[-*+]%s+', '. ')  -- Add period for pause between list items
-  text = text:gsub('(%S)%s+[-*+]%s+', '%1. ')  -- Add period for pause in single-line lists
+  text = text:gsub('(%S)[^%S\n]+[-*+][^%S\n]+', '%1. ')  -- Add period for pause in single-line lists
   
   -- Remove numbered list markers and add pauses
   text = text:gsub('^%s*%d+%.%s+', '')
   text = text:gsub('\n%s*%d+%.%s+', '. ')  -- Add period for pause between numbered items
-  text = text:gsub('(%S)%s+%d+%.%s+', '%1. ')  -- Add period for pause in single-line numbered lists
+  text = text:gsub('(%S)[^%S\n]+%d+%.[^%S\n]+', '%1. ')  -- Add period for pause in single-line numbered lists
   
   -- Remove emphasis markers (bold, italic) - non-greedy matching
   text = text:gsub('%*%*%*(.-)%*%*%*', '%1')  -- Bold + italic
@@ -417,6 +420,12 @@ function M.chunk_text(text, chunk_size)
       end
     end
     
+    if chunk_end < current_pos then
+      chunk_end = current_pos
+    end
+
+    chunk_end = chunk_end + vim.str_utf_end(text, chunk_end)
+    
     local chunk = text:sub(current_pos, chunk_end)
     table.insert(chunks, vim.trim(chunk))
     current_pos = chunk_end + 1
@@ -427,6 +436,141 @@ function M.chunk_text(text, chunk_size)
   end
   
   return chunks
+end
+
+local function is_speakable(piece)
+  return piece:match('[^%s%p]') ~= nil
+end
+
+local function group_lines(text, lines_per_segment)
+  local group_size = math.max(1, math.floor(tonumber(lines_per_segment) or 1))
+  local segments = {}
+  local group = {}
+
+  for line in text:gmatch('[^\n]+') do
+    line = vim.trim(line)
+    if is_speakable(line) then
+      table.insert(group, line)
+      if #group == group_size then
+        table.insert(segments, table.concat(group, '\n'))
+        group = {}
+      end
+    end
+  end
+
+  if #group > 0 then
+    table.insert(segments, table.concat(group, '\n'))
+  end
+
+  return segments
+end
+
+function M.split_segments(text)
+  if not text or text:match('^%s*$') then
+    return {}
+  end
+
+  local playback = require('tts.config').get().playback
+  local mode = playback.segmentation or 'sentence'
+
+  if mode == 'none' then
+    return { vim.trim(text) }
+  end
+
+  if mode == 'line' then
+    return group_lines(text, playback.lines_per_segment)
+  end
+
+  local segments = {}
+  for line in text:gmatch('[^\n]+') do
+    local pos = 1
+    while true do
+      local s, e = line:find('[%.!%?]["%)%]]*%s+', pos)
+      if not s then
+        break
+      end
+      table.insert(segments, vim.trim(line:sub(pos, e)))
+      pos = e + 1
+    end
+    table.insert(segments, vim.trim(line:sub(pos)))
+  end
+
+  local result = {}
+  for _, piece in ipairs(segments) do
+    if is_speakable(piece) then
+      if #piece > playback.chunk_size then
+        for _, chunk in ipairs(M.chunk_text(piece, playback.chunk_size)) do
+          if is_speakable(chunk) then
+            table.insert(result, chunk)
+          end
+        end
+      else
+        table.insert(result, piece)
+      end
+    end
+  end
+
+  return result
+end
+
+function M.group_source_lines(lines, start_line)
+  local config = require('tts.config').get()
+  local playback = config.playback
+  local mode = playback.segmentation or 'sentence'
+
+  local group_size
+  if mode == 'line' then
+    group_size = math.max(1, math.floor(tonumber(playback.lines_per_segment) or 1))
+  elseif mode == 'none' then
+    group_size = math.huge
+  else
+    group_size = 1
+  end
+
+  local skip_code = config.preprocessing and config.preprocessing.skip_code_blocks
+  local groups = {}
+  local group, first, last = {}, nil, nil
+  local in_fence = false
+
+  local function flush()
+    if #group > 0 then
+      table.insert(groups, {
+        text = table.concat(group, '\n'),
+        first = first,
+        last = last,
+      })
+    end
+    group, first, last = {}, nil, nil
+  end
+
+  for i, line in ipairs(lines) do
+    local buf_line = start_line + i - 1
+    local skip = false
+
+    if skip_code then
+      if line:match('^%s*```') or line:match('^%s*~~~') then
+        in_fence = not in_fence
+        skip = true
+      elseif in_fence then
+        skip = true
+      end
+    end
+
+    if not skip and is_speakable(line) then
+      if not first then
+        first = buf_line
+      end
+      last = buf_line
+      table.insert(group, line)
+      if #group >= group_size then
+        flush()
+      end
+    end
+  end
+
+  flush()
+
+  return groups
 end
 
 function M.notify(message, level)
@@ -452,6 +596,10 @@ function M.notify(message, level)
   vim.notify('[TTS] ' .. message, level)
 end
 
+function M.echo_lines(lines)
+  vim.api.nvim_echo({ { table.concat(lines, '\n') } }, true, {})
+end
+
 function M.progress(message, percentage)
   local config = require('tts.config').get().playback
   
@@ -463,7 +611,7 @@ function M.progress(message, percentage)
     message = string.format('%s (%.0f%%)', message, percentage)
   end
   
-  vim.g.tts_progress = message
+  vim.g.tts_progress = message or ''
   vim.cmd('redrawstatus')
 end
 

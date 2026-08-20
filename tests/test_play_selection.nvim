@@ -1,0 +1,140 @@
+" Test play_selection routing: active selection, whole buffer, and configurable fallbacks
+let g:tts_test_root = expand('<sfile>:p:h:h')
+lua << EOF
+for k in pairs(package.loaded) do
+  if k:find('^tts') then package.loaded[k] = nil end
+end
+
+local tts_test_root = vim.g.tts_test_root
+if tts_test_root == nil or tts_test_root == '' then
+  tts_test_root = vim.fn.getcwd()
+end
+package.path = tts_test_root .. "/lua/?.lua;" .. tts_test_root .. "/lua/?/init.lua;" .. package.path
+
+local tts = require('tts')
+local backends = require('tts.backends')
+local queue = require('tts.queue')
+
+tts.setup({
+  playback = { segmentation = 'line', lines_per_segment = 1 },
+  keymaps = {},
+  cache = { enabled = false },
+})
+
+local spoken = {}
+backends.speak = function(text, opts)
+  table.insert(spoken, text)
+  opts.on_complete()
+  return { stop = function() end }
+end
+backends.stop = function() end
+backends.prefetch = function() end
+
+local passed = 0
+local failed = 0
+
+local function check(name, ok, detail)
+  if ok then
+    passed = passed + 1
+    print(string.format("PASS: %s", name))
+  else
+    failed = failed + 1
+    print(string.format("FAIL: %s -- %s", name, detail or ''))
+  end
+end
+
+local function spoken_texts()
+  return table.concat(spoken, ' | ')
+end
+
+print("Testing play_selection default routing")
+print("=" .. string.rep("=", 60))
+
+vim.api.nvim_buf_set_lines(0, 0, -1, false, {
+  'Intro paragraph',
+  'Alpha line.',
+  '---',
+  'Detail paragraph',
+  'Beta line.',
+  'Gamma line.',
+})
+
+-- The assertion body is pcall-wrapped so a Lua error inside the module under
+-- test surfaces as a failure (cquit 1) instead of aborting with exit 0.
+local body_ok, body_err = pcall(function()
+
+-- with no selection the default plays the whole buffer, even mid-file
+vim.api.nvim_win_set_cursor(0, { 5, 0 })
+tts.play_selection()
+check("default plays the whole buffer from the middle of a file",
+  #spoken == 5 and spoken[1] == "Intro paragraph" and spoken[5] == "Gamma line.",
+  spoken_texts())
+
+-- a stale visual selection must not hijack normal-mode playback
+vim.api.nvim_win_set_cursor(0, { 1, 0 })
+vim.cmd('normal! vj')
+vim.cmd('normal! \27')
+check("visual mode was entered and left (marks set)",
+  vim.fn.visualmode() == 'v' and vim.fn.getpos("'<")[2] == 1 and vim.fn.getpos("'>")[2] == 2,
+  "visualmode=" .. tostring(vim.fn.visualmode()))
+
+queue.clear()
+spoken = {}
+vim.api.nvim_win_set_cursor(0, { 5, 0 })
+tts.play_selection()
+check("a stale visual selection is ignored in normal mode",
+  #spoken == 5 and spoken[1] == "Intro paragraph" and spoken[5] == "Gamma line.",
+  spoken_texts())
+
+-- an active visual selection still wins over the whole buffer
+queue.clear()
+spoken = {}
+vim.api.nvim_win_set_cursor(0, { 1, 0 })
+vim.cmd('normal! Vj')
+tts.play_selection()
+check("an active visual selection plays only the selection",
+  #spoken == 2 and spoken[1] == "Intro paragraph" and spoken[2] == "Alpha line.",
+  spoken_texts())
+
+-- explicit section fallback still plays only the cursor's section
+require('tts.config').setup({
+  playback = { segmentation = 'line', lines_per_segment = 1, default_selection = 'section' },
+  keymaps = {},
+  cache = { enabled = false },
+})
+queue.clear()
+spoken = {}
+vim.api.nvim_win_set_cursor(0, { 5, 0 })
+tts.play_selection()
+check("default_selection='section' plays only the cursor's section",
+  #spoken == 3 and spoken[1] == "Detail paragraph" and spoken[3] == "Gamma line.",
+  spoken_texts())
+
+-- explicit line fallback plays only the cursor's line
+require('tts.config').setup({
+  playback = { segmentation = 'line', lines_per_segment = 1, default_selection = 'line' },
+  keymaps = {},
+  cache = { enabled = false },
+})
+queue.clear()
+spoken = {}
+vim.api.nvim_win_set_cursor(0, { 5, 0 })
+tts.play_selection()
+check("default_selection='line' plays only the cursor's line",
+  #spoken == 1 and spoken[1] == "Beta line.",
+  spoken_texts())
+
+end)
+
+if not body_ok then
+  failed = failed + 1
+  print(string.format("FAIL: play_selection test body errored -- %s", tostring(body_err)))
+end
+
+print("=" .. string.rep("=", 60))
+print(string.format("Results: %d passed, %d failed", passed, failed))
+
+if failed > 0 then
+  vim.cmd('cquit 1')
+end
+EOF

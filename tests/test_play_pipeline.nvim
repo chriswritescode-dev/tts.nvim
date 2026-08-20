@@ -1,0 +1,288 @@
+" Test that every playback entry point routes through the queue
+let g:tts_test_root = expand('<sfile>:p:h:h')
+lua << EOF
+for k in pairs(package.loaded) do
+  if k:find('^tts') then package.loaded[k] = nil end
+end
+
+local tts_test_root = vim.g.tts_test_root
+if tts_test_root == nil or tts_test_root == '' then
+  tts_test_root = vim.fn.getcwd()
+end
+package.path = tts_test_root .. "/lua/?.lua;" .. tts_test_root .. "/lua/?/init.lua;" .. package.path
+
+local after_play_calls = {}
+
+require('tts.config').setup({
+  playback = { segmentation = 'sentence' },
+  hooks = {
+    before_play = function(text)
+      return text:gsub('MARK', 'marker')
+    end,
+    after_play = function(text)
+      table.insert(after_play_calls, text)
+    end,
+  },
+})
+
+local tts = require('tts')
+local queue = require('tts.queue')
+local backends = require('tts.backends')
+
+local spoken = {}
+local captured = {}
+local stop_count = 0
+
+backends.speak = function(text, opts)
+  table.insert(spoken, text)
+  table.insert(captured, opts.on_complete)
+  return { stop = function() end }
+end
+
+backends.stop = function(opts)
+  stop_count = stop_count + 1
+end
+
+local prefetched = {}
+backends.prefetch = function(text, opts)
+  table.insert(prefetched, text)
+end
+
+local passed = 0
+local failed = 0
+
+local function check(name, ok, detail)
+  if ok then
+    passed = passed + 1
+    print(string.format("PASS: %s", name))
+  else
+    failed = failed + 1
+    print(string.format("FAIL: %s -- %s", name, detail or ''))
+  end
+end
+
+local function spoken_texts()
+  return table.concat(spoken, ' | ')
+end
+
+print("Testing play pipeline routes every entry point through the queue")
+print("=" .. string.rep("=", 60))
+
+-- The assertion body is pcall-wrapped so a Lua error inside the module under
+-- test surfaces as a failure (cquit 1) instead of aborting with exit 0.
+local body_ok, body_err = pcall(function()
+
+-- play() creates a queue run and speaks the first segment
+tts.play("One. Two. Three.")
+check("play speaks the first segment", #spoken == 1 and spoken[1] == "One.", spoken_texts())
+check("play creates one queue item per segment", queue.size() == 3, "size=" .. queue.size())
+check("play starts at index 1",
+  queue.get_current() and queue.get_current().text == "One.",
+  queue.get_current() and queue.get_current().text or "nil")
+check("after_play does not fire mid-run", #after_play_calls == 0, #after_play_calls)
+check("progress shows 1/3 after play", vim.g.tts_progress == '1/3', tostring(vim.g.tts_progress))
+check("play prefetches the next segment", #prefetched == 1 and prefetched[1] == "Two.", table.concat(prefetched, ' | '))
+
+-- next/prev work immediately after play(), without a separate entry point
+queue.skip()
+check("skip works right after play",
+  queue.get_current() and queue.get_current().text == "Two.",
+  queue.get_current() and queue.get_current().text or "nil")
+check("progress shows 2/3 after skip", vim.g.tts_progress == '2/3', tostring(vim.g.tts_progress))
+check("skip prefetches the new next segment", #prefetched == 2 and prefetched[2] == "Three.", table.concat(prefetched, ' | '))
+queue.previous()
+check("previous works right after play",
+  queue.get_current() and queue.get_current().text == "One.",
+  queue.get_current() and queue.get_current().text or "nil")
+check("previous prefetches the segment after the new current", #prefetched == 3 and prefetched[3] == "Two.", table.concat(prefetched, ' | '))
+
+-- driving all completions fires after_play exactly once with the original text
+captured[#captured]() -- complete segment 1 (re-spoken by previous())
+captured[#captured]() -- complete segment 2
+captured[#captured]() -- complete segment 3
+check("progress is cleared when the run finishes", vim.g.tts_progress == '', tostring(vim.g.tts_progress))
+check("after_play fires exactly once at run end", #after_play_calls == 1, #after_play_calls)
+check("after_play receives the original selection text",
+  after_play_calls[1] == "One. Two. Three.", after_play_calls[1] or "nil")
+check("playing the final segment prefetches nothing", #prefetched == 4, table.concat(prefetched, ' | '))
+
+-- a second play() replaces the previous run entirely
+tts.play("X. Y.")
+check("second play replaces the run", queue.size() == 2, "size=" .. queue.size())
+check("second play restarts at index 1",
+  queue.get_current() and queue.get_current().text == "X.",
+  queue.get_current() and queue.get_current().text or "nil")
+
+local before_stale = #spoken
+captured[1]() -- stale callback from run one, segment 1
+captured[2]() -- stale callback from run one, segment 2
+captured[3]() -- stale callback from run one, segment 3
+check("stale callbacks from the replaced run speak nothing", #spoken == before_stale, spoken_texts())
+check("stale callbacks from the replaced run do not fire after_play",
+  #after_play_calls == 1, #after_play_calls)
+
+captured[#captured]() -- complete run two's segment 1
+captured[#captured]() -- complete run two's segment 2
+check("second run fires after_play once with its own text",
+  #after_play_calls == 2 and after_play_calls[2] == "X. Y.",
+  table.concat(after_play_calls, ' | '))
+
+-- after_play receives the raw selection text, not the preprocessed form
+tts.play("# Heading\n\nLine one. Line two.")
+check("markdown play splits into three segments", queue.size() == 3, "size=" .. queue.size())
+captured[#captured]() -- complete "Heading"
+captured[#captured]() -- complete "Line one."
+captured[#captured]() -- complete "Line two."
+check("after_play receives the raw markdown text",
+  #after_play_calls == 3 and after_play_calls[3] == "# Heading\n\nLine one. Line two.",
+  table.concat(after_play_calls, ' | '))
+
+-- before_play's returned value is applied before segmentation
+tts.play("MARK one. Two.")
+check("before_play is applied before segmentation",
+  #spoken > 0 and spoken[#spoken] == "marker one.", spoken_texts())
+
+-- queue_add appends preprocessed segments rather than raw markdown
+local size_before = queue.size()
+tts.queue_add("# Heading\n\nLine one.\nLine two.")
+local list = queue.list()
+check("queue_add appends one item per preprocessed segment",
+  queue.size() == size_before + 3, "size_before=" .. size_before .. " size=" .. queue.size())
+check("queue_add's appended segment is markdown-cleaned",
+  list[size_before + 1] and list[size_before + 1].text == "Heading",
+  list[size_before + 1] and list[size_before + 1].text or "nil")
+check("queue_add's appended segment keeps its sentence end",
+  list[size_before + 2] and list[size_before + 2].text == "Line one.",
+  list[size_before + 2] and list[size_before + 2].text or "nil")
+
+-- completing the run after a mid-run queue_add reports the run's own text
+for _ = 1, 5 do
+  captured[#captured]() -- "marker one.", "Two.", "Heading", "Line one.", "Line two."
+end
+check("append mid-run does not change after_play text",
+  #after_play_calls == 4 and after_play_calls[4] == "MARK one. Two.",
+  table.concat(after_play_calls, ' | '))
+
+-- text that preprocesses to nothing creates no run and appends nothing
+local before_empty = #spoken
+local size_empty = queue.size()
+tts.play("###")
+check("play of empty-after-preprocessing text speaks nothing", #spoken == before_empty, spoken_texts())
+check("play of empty-after-preprocessing text creates no run", queue.size() == size_empty, "size=" .. queue.size())
+tts.queue_add("###")
+check("queue_add of empty-after-preprocessing text appends nothing", queue.size() == size_empty, "size=" .. queue.size())
+
+-- an unspeakable play() mid-run must not wipe the in-flight run
+queue.clear()
+tts.play("A one. A two. A three.")
+local size_before = queue.size()
+local spoken_before = #spoken
+local stops_before = stop_count
+tts.play("***")
+check("unspeakable play mid-run preserves the run size", queue.size() == size_before, "size=" .. queue.size())
+check("unspeakable play mid-run keeps the current segment",
+  queue.get_current() and queue.get_current().text == "A one.",
+  queue.get_current() and queue.get_current().text or "nil")
+check("unspeakable play mid-run stays active", queue.is_active(), "active=" .. tostring(queue.is_active()))
+check("unspeakable play mid-run speaks nothing", #spoken == spoken_before, spoken_texts())
+check("unspeakable play mid-run does not stop the backend", stop_count == stops_before, "stops=" .. stop_count)
+captured[#captured]() -- complete "A one."
+captured[#captured]() -- complete "A two."
+captured[#captured]() -- complete "A three."
+check("unspeakable play mid-run still completes the run",
+  #after_play_calls == 5 and after_play_calls[5] == "A one. A two. A three.",
+  table.concat(after_play_calls, ' | '))
+
+-- an unspeakable queue_add resolves to zero segments and appends nothing,
+-- so it cannot spuriously finish an idle run
+queue.clear()
+tts.play("A. B.")
+captured[#captured]() -- complete A
+captured[#captured]() -- complete B
+local plays_after_run = #after_play_calls
+local size_after_run = queue.size()
+tts.queue_add("!!!")
+check("unspeakable queue_add appends nothing", queue.size() == size_after_run, "size=" .. queue.size())
+check("unspeakable queue_add does not re-finish the run", #after_play_calls == plays_after_run, #after_play_calls)
+
+-- a finished run is idempotent: skip at the end must not re-fire after_play
+queue.skip()
+check("skip after finish does not re-fire after_play", #after_play_calls == plays_after_run, #after_play_calls)
+queue.skip()
+check("repeated skip after finish still does not re-fire after_play", #after_play_calls == plays_after_run, #after_play_calls)
+
+-- a queue_add on an idle queue starts its own run and reports its own text
+queue.clear()
+tts.queue_add("Fresh queue. Second part.")
+check("queue_add on idle queue starts a run",
+  queue.get_current() and queue.get_current().text == "Fresh queue.",
+  queue.get_current() and queue.get_current().text or "nil")
+captured[#captured]() -- complete "Fresh queue."
+captured[#captured]() -- complete "Second part."
+check("queue_add-started run fires after_play with its raw text",
+  #after_play_calls == plays_after_run + 1
+    and after_play_calls[#after_play_calls] == "Fresh queue. Second part.",
+  table.concat(after_play_calls, ' | '))
+
+-- stop clears the position indicator mid-run
+queue.clear()
+tts.play("Stop one. Stop two.")
+check("progress shows 1/2 after play", vim.g.tts_progress == '1/2', tostring(vim.g.tts_progress))
+tts.stop()
+check("progress is cleared on stop", vim.g.tts_progress == '', tostring(vim.g.tts_progress))
+
+-- line segmentation: one segment per line, so count jumps map to lines
+require('tts.config').setup({ playback = { segmentation = 'line', lines_per_segment = 1 } })
+queue.clear()
+tts.play("Line A.\nLine B.\nLine C.")
+check("line mode creates one segment per line", queue.size() == 3, "size=" .. queue.size())
+check("line mode keeps the full line as a segment",
+  queue.get_current() and queue.get_current().text == "Line A.",
+  queue.get_current() and queue.get_current().text or "nil")
+check("progress shows 1/3 in line mode", vim.g.tts_progress == '1/3', tostring(vim.g.tts_progress))
+
+queue.skip(2)
+check("skip(2) jumps two segments forward",
+  queue.get_current() and queue.get_current().text == "Line C.",
+  queue.get_current() and queue.get_current().text or "nil")
+check("progress shows 3/3 after skip(2)", vim.g.tts_progress == '3/3', tostring(vim.g.tts_progress))
+
+queue.previous(1)
+check("previous(1) goes back one segment",
+  queue.get_current() and queue.get_current().text == "Line B.",
+  queue.get_current() and queue.get_current().text or "nil")
+
+queue.previous(5)
+check("previous(5) clamps to the first segment",
+  queue.get_current() and queue.get_current().text == "Line A.",
+  queue.get_current() and queue.get_current().text or "nil")
+
+queue.skip(9)
+check("skip past the end finishes the run", queue.is_active() == false, "active=" .. tostring(queue.is_active()))
+check("skip past the end clears progress", vim.g.tts_progress == '', tostring(vim.g.tts_progress))
+
+queue.clear()
+tts.play("A.\nB.\nC.")
+queue.skip()
+check("skip() with no count moves one segment",
+  queue.get_current() and queue.get_current().text == "B.",
+  queue.get_current() and queue.get_current().text or "nil")
+queue.skip(0)
+check("skip(0) behaves like a single skip",
+  queue.get_current() and queue.get_current().text == "C.",
+  queue.get_current() and queue.get_current().text or "nil")
+
+end)
+
+if not body_ok then
+  failed = failed + 1
+  print(string.format("FAIL: play pipeline test body errored -- %s", tostring(body_err)))
+end
+
+print("=" .. string.rep("=", 60))
+print(string.format("Results: %d passed, %d failed", passed, failed))
+
+if failed > 0 then
+  vim.cmd('cquit 1')
+end
+EOF

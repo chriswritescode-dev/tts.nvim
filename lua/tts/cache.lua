@@ -1,6 +1,25 @@
 local M = {}
 local cache_index = {}
 local cache_dir = nil
+local dirty = false
+
+local function usable(path)
+  return vim.fn.filereadable(path) == 1 and vim.fn.getfsize(path) > 0
+end
+
+local function cached_files()
+  if not cache_dir then
+    return {}
+  end
+
+  local out = {}
+  for _, name in ipairs(vim.fn.readdir(cache_dir)) do
+    if name ~= 'index.json' then
+      table.insert(out, name)
+    end
+  end
+  return out
+end
 
 function M.init()
   local config = require('tts.config').get().cache
@@ -20,14 +39,17 @@ function M.init()
   end
 end
 
-function M.get_path(key)
+function M.get_path(key, ext)
   if not cache_dir then
     M.init()
   end
-  return cache_dir .. '/' .. key .. '.audio'
+  if not cache_dir then
+    return nil
+  end
+  return cache_dir .. '/' .. key .. '.' .. (ext or 'audio')
 end
 
-function M.get(key)
+function M.get(key, ext)
   if not cache_dir then
     M.init()
   end
@@ -37,19 +59,48 @@ function M.get(key)
     return nil
   end
   
-  local path = M.get_path(key)
+  local path = M.get_path(key, ext)
+  if not path then
+    return nil
+  end
   
-  if vim.fn.filereadable(path) == 1 then
-    cache_index[key] = {
-      path = path,
-      last_access = os.time(),
-      hits = (cache_index[key] and cache_index[key].hits or 0) + 1
-    }
-    M.save_index()
+  if usable(path) then
+    local entry = cache_index[key]
+    if entry then
+      entry.last_access = os.time()
+      entry.hits = (entry.hits or 0) + 1
+    else
+      cache_index[key] = {
+        path = path,
+        created = os.time(),
+        last_access = os.time(),
+        size = vim.fn.getfsize(path),
+        hits = 1
+      }
+    end
+    dirty = true
     return path
   end
   
   return nil
+end
+
+function M.has(key, ext)
+  if not cache_dir then
+    M.init()
+  end
+  
+  local config = require('tts.config').get().cache
+  if not config.enabled then
+    return false
+  end
+  
+  local path = M.get_path(key, ext)
+  if not path then
+    return false
+  end
+  
+  return usable(path)
 end
 
 function M.set(key, file_path)
@@ -62,11 +113,15 @@ function M.set(key, file_path)
     return false
   end
   
-  local cache_path = M.get_path(key)
+  local ext = file_path:match('%.([%w]+)$')
+  local cache_path = M.get_path(key, ext)
+  if not cache_path then
+    return false
+  end
   
   if file_path ~= cache_path then
-    vim.fn.system('cp ' .. vim.fn.shellescape(file_path) .. ' ' .. vim.fn.shellescape(cache_path))
-    if vim.v.shell_error ~= 0 then
+    local copied = vim.loop.fs_copyfile(file_path, cache_path)
+    if not copied then
       return false
     end
   end
@@ -103,9 +158,10 @@ function M.clear()
     return
   end
   
-  for key, entry in pairs(cache_index) do
-    if vim.fn.filereadable(entry.path) == 1 then
-      vim.fn.delete(entry.path)
+  for _, name in ipairs(cached_files()) do
+    local path = cache_dir .. '/' .. name
+    if vim.fn.filereadable(path) == 1 then
+      vim.fn.delete(path)
     end
   end
   
@@ -137,6 +193,25 @@ function M.cleanup()
     elseif vim.fn.filereadable(entry.path) ~= 1 then
       cache_index[key] = nil
       removed_count = removed_count + 1
+    end
+  end
+  
+  local indexed_paths = {}
+  for _, entry in pairs(cache_index) do
+    indexed_paths[entry.path] = true
+  end
+
+  for _, name in ipairs(cached_files()) do
+    local path = cache_dir .. '/' .. name
+
+    if not indexed_paths[path] then
+      local age = current_time - vim.fn.getftime(path)
+      if age > max_age_seconds then
+        if vim.fn.filereadable(path) == 1 then
+          vim.fn.delete(path)
+        end
+        removed_count = removed_count + 1
+      end
     end
   end
   
@@ -190,6 +265,8 @@ function M.save_index()
     file:write(data)
     file:close()
   end
+
+  dirty = false
 end
 
 function M.load_index()
@@ -237,20 +314,30 @@ function M.generate_key(text, opts)
   opts = opts or {}
   
   local key_parts = {
-    text:sub(1, 100),
-    opts.voice or 'default',
-    opts.rate or 'default',
-    opts.backend or 'default'
+    text,
+    tostring(opts.backend or 'default'),
+    tostring(opts.api_url or 'default'),
+    tostring(opts.model or 'default'),
+    tostring(opts.voice or 'default'),
+    tostring(opts.speed or 'default'),
+    tostring(opts.format or 'default'),
+    tostring(opts.rate or 'default')
   }
   
   local key_string = table.concat(key_parts, '|')
   
-  local hash = 5381
-  for i = 1, #key_string do
-    hash = ((hash * 33) + string.byte(key_string, i)) % 2147483647
-  end
-  
-  return string.format('%x', hash)
+  return vim.fn.sha256(key_string)
 end
+
+local function flush_index()
+  if dirty then
+    M.save_index()
+  end
+end
+
+vim.api.nvim_create_autocmd('VimLeavePre', {
+  group = vim.api.nvim_create_augroup('TTSCacheFlush', { clear = true }),
+  callback = flush_index,
+})
 
 return M

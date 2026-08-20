@@ -1,0 +1,111 @@
+" Test player job supersession: a stale killed-process callback must not
+" orphan the currently playing job
+let g:tts_test_root = expand('<sfile>:p:h:h')
+lua << EOF
+for k in pairs(package.loaded) do
+  if k:find('^tts') then package.loaded[k] = nil end
+end
+
+local tts_test_root = vim.g.tts_test_root
+if tts_test_root == nil or tts_test_root == '' then
+  tts_test_root = vim.fn.getcwd()
+end
+package.path = tts_test_root .. "/lua/?.lua;" .. tts_test_root .. "/lua/?/init.lua;" .. package.path
+
+require('tts.config').setup({})
+
+local passed = 0
+local failed = 0
+
+local function check(name, ok, detail)
+  if ok then
+    passed = passed + 1
+    print(string.format("PASS: %s", name))
+  else
+    failed = failed + 1
+    print(string.format("FAIL: %s -- %s", name, detail or ''))
+  end
+end
+
+print("Testing player job supersession")
+print("=" .. string.rep("=", 60))
+
+local spawned = {}
+local real_spawn = vim.loop.spawn
+local real_schedule = vim.schedule
+
+vim.schedule = function(fn)
+  fn()
+end
+
+vim.loop.spawn = function(prog, opts, cb)
+  local job = { killed = false, closed = false, prog = prog }
+  table.insert(spawned, { job = job, cb = cb, opts = opts })
+  job.is_closing = function() return job.closed end
+  job.kill = function() job.killed = true end
+  job.close = function() job.closed = true end
+  return job
+end
+
+local body_ok, body_err = pcall(function()
+  local player = require('tts.player')
+
+  local completed = {}
+  local function play_file(name)
+    return player.play('/tmp/' .. name .. '.mp3', {
+      on_complete = function(code) table.insert(completed, { name = name, code = code }) end
+    })
+  end
+
+  local handle1 = play_file('a')
+  check("first play spawns a job", #spawned == 1, "spawned=" .. #spawned)
+  check("first play returns a handle", type(handle1) == 'table', type(handle1))
+  check("player is playing after first play", player.is_playing() == true)
+
+  player.stop()
+  check("stop kills the current job", spawned[1].job.killed == true)
+  check("player is idle after stop", player.is_playing() == false)
+
+  play_file('b')
+  check("second play spawns a new job", #spawned == 2, "spawned=" .. #spawned)
+  check("player is playing after second play", player.is_playing() == true)
+
+  spawned[1].cb(15)
+  check("stale killed callback does not clear the active job", player.is_playing() == true)
+  check("stale callback fires no on_complete", #completed == 0, "completed=" .. #completed)
+
+  player.stop()
+  check("stop after stale callback kills the active job", spawned[2].job.killed == true)
+  check("player is idle after final stop", player.is_playing() == false)
+
+  play_file('c')
+  check("third play spawns a new job", #spawned == 3, "spawned=" .. #spawned)
+  spawned[2].cb(15)
+  check("older stale callback cannot orphan the newest job", player.is_playing() == true)
+
+  spawned[3].cb(0)
+  check("natural completion clears the job", player.is_playing() == false)
+  check("natural completion fires on_complete once", #completed == 1 and completed[1].name == 'c',
+    vim.inspect(completed))
+
+  play_file('d')
+  spawned[3].cb(0)
+  check("stale success callback does not fire on_complete", #completed == 1, vim.inspect(completed))
+  check("stale success callback does not clear the active job", player.is_playing() == true)
+end)
+
+if not body_ok then
+  failed = failed + 1
+  print(string.format("FAIL: player test body errored -- %s", tostring(body_err)))
+end
+
+vim.loop.spawn = real_spawn
+vim.schedule = real_schedule
+
+print("=" .. string.rep("=", 60))
+print(string.format("Results: %d passed, %d failed", passed, failed))
+
+if failed > 0 then
+  vim.cmd('cquit 1')
+end
+EOF

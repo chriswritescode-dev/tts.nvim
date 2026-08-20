@@ -1,0 +1,180 @@
+" Test cache keys, paths and retention
+let g:tts_test_root = expand('<sfile>:p:h:h')
+lua << EOF
+for k in pairs(package.loaded) do
+  if k:find('^tts') then package.loaded[k] = nil end
+end
+
+local tts_test_root = vim.g.tts_test_root
+if tts_test_root == nil or tts_test_root == '' then
+  tts_test_root = vim.fn.getcwd()
+end
+package.path = tts_test_root .. "/lua/?.lua;" .. tts_test_root .. "/lua/?/init.lua;" .. package.path
+
+require('tts.config').setup({})
+
+local passed = 0
+local failed = 0
+
+local function check(name, ok, detail)
+  if ok then
+    passed = passed + 1
+    print(string.format("PASS: %s", name))
+  else
+    failed = failed + 1
+    print(string.format("FAIL: %s -- %s", name, detail or ''))
+  end
+end
+
+local function write_file(path, content)
+  local f = io.open(path, 'w')
+  f:write(content)
+  f:close()
+end
+
+local function read_index(dir)
+  local f = io.open(dir .. '/index.json', 'r')
+  local data = f:read('*all')
+  f:close()
+  return vim.fn.json_decode(data)
+end
+
+print("Testing cache keys, paths and retention")
+print("=" .. string.rep("=", 60))
+
+local cache = require('tts.cache')
+
+-- Key generation is pure and collision-safe across the full text and every
+-- request parameter that changes the produced audio.
+local text = "The quick brown fox jumps over the lazy dog."
+local base_opts = { backend = 'macos', voice = 'Alex', rate = 200 }
+local k1 = cache.generate_key(text, base_opts)
+local k2 = cache.generate_key(text, base_opts)
+check("identical text+opts produce identical keys", k1 == k2, k1 .. " vs " .. k2)
+check("key is 64-char lowercase sha256 hex", #k1 == 64 and k1:match('^[%x]+$') ~= nil, k1)
+
+check("voice changes the key",
+  cache.generate_key(text, { voice = 'Samantha' }) ~= cache.generate_key(text, { voice = 'Alex' }))
+check("model changes the key",
+  cache.generate_key(text, { model = 'tts-1' }) ~= cache.generate_key(text, { model = 'tts-1-hd' }))
+check("speed changes the key",
+  cache.generate_key(text, { speed = 1.0 }) ~= cache.generate_key(text, { speed = 1.5 }))
+check("format changes the key",
+  cache.generate_key(text, { format = 'mp3' }) ~= cache.generate_key(text, { format = 'wav' }))
+check("api_url changes the key",
+  cache.generate_key(text, { api_url = 'https://api.openai.com/v1/audio/speech' })
+    ~= cache.generate_key(text, { api_url = 'https://other.example/v1' }))
+
+local long_a = string.rep('a', 100) .. string.rep('b', 100)
+local long_b = string.rep('a', 100) .. string.rep('c', 100)
+check("200-char texts sharing first 100 chars differ",
+  cache.generate_key(long_a) ~= cache.generate_key(long_b))
+
+-- Real module against a fresh temp directory. The body is pcall-wrapped so a
+-- Lua error inside the module under test surfaces as a failure (cquit 1)
+-- instead of aborting the heredoc with exit 0.
+local body_ok, body_err = pcall(function()
+  local cache_dir = vim.fn.tempname()
+  require('tts.config').setup({ cache = { directory = cache_dir, cleanup_on_start = false } })
+  cache.init()
+  check("cache dir created", vim.fn.isdirectory(cache_dir) == 1)
+
+  local audio = vim.fn.tempname() .. '.mp3'
+  write_file(audio, string.rep('x', 2000))
+  local key = cache.generate_key("cache segment one.", { backend = 'macos', voice = 'Alex' })
+
+  check("set returns true", cache.set(key, audio) == true)
+  local idx = read_index(cache_dir)
+  check("set records zero hits", idx[key] and idx[key].hits == 0, vim.inspect(idx[key]))
+  local got = cache.get(key, 'mp3')
+  check("get returns a readable path", got ~= nil and vim.fn.filereadable(got) == 1, got or 'nil')
+  check("get path ends in the source extension", got ~= nil and got:match('%.mp3$') ~= nil, got or 'nil')
+
+  -- has is a side-effect-free probe; get records the hit
+  cache.save_index()
+  idx = read_index(cache_dir)
+  local hits_after_get = idx[key].hits
+  check("has is true for a cached entry", cache.has(key, 'mp3') == true)
+  check("has is false for a missing key", cache.has(cache.generate_key('never stored')) == false)
+  idx = read_index(cache_dir)
+  check("has leaves hits untouched", idx[key].hits == hits_after_get, idx[key].hits .. " vs " .. hits_after_get)
+  check("get returns the same path", cache.get(key, 'mp3') == got)
+  cache.save_index()
+  idx = read_index(cache_dir)
+  check("get increments hits", idx[key].hits == hits_after_get + 1, idx[key].hits .. " vs " .. (hits_after_get + 1))
+
+  -- a read hit must preserve created and size, or cleanup/check_size break
+  local created_before = idx[key].created
+  local size_before = idx[key].size
+  cache.get(key, 'mp3')
+  cache.save_index()
+  idx = read_index(cache_dir)
+  check("get hit preserves created",
+    created_before ~= nil and idx[key] and idx[key].created == created_before,
+    "before=" .. tostring(created_before) .. " after=" .. tostring(idx[key] and idx[key].created))
+  check("get hit preserves size",
+    size_before ~= nil and idx[key] and idx[key].size == size_before,
+    "before=" .. tostring(size_before) .. " after=" .. tostring(idx[key] and idx[key].size))
+
+  -- check_size must still evict after entries have been read (the regression the
+  -- in-place update fixes: the old code dropped size on every read)
+  for i = 1, 3 do
+    local f = vim.fn.tempname() .. '.wav'
+    write_file(f, string.rep('y', 3000))
+    cache.set(cache.generate_key('evict ' .. i), f)
+    cache.get(cache.generate_key('evict ' .. i), 'wav')
+  end
+  require('tts.config').get().cache.max_size = 0.001
+  cache.check_size()
+  idx = read_index(cache_dir)
+  local remaining = 0
+  for k in pairs(idx) do
+    remaining = remaining + 1
+  end
+  check("check_size evicts after entries have been read", remaining == 0, "remaining=" .. remaining)
+
+  -- a zero-byte entry is never served
+  local zkey = cache.generate_key("zero byte segment.")
+  local zfile = vim.fn.tempname() .. '.mp3'
+  write_file(zfile, '')
+  check("set accepts a zero-byte file", cache.set(zkey, zfile) == true)
+  check("has is false for a zero-byte entry", cache.has(zkey, 'mp3') == false)
+  check("get returns nil for a zero-byte entry", cache.get(zkey, 'mp3') == nil)
+
+  -- a file on disk with no index entry is adopted on read
+  local ghost_key = cache.generate_key("orphan on disk.")
+  write_file(cache.get_path(ghost_key), string.rep('g', 100))
+  check("get adopts an unindexed on-disk file", cache.get(ghost_key) ~= nil)
+  cache.save_index()
+  idx = read_index(cache_dir)
+  check("adopted entry records size",
+    idx[ghost_key] ~= nil and idx[ghost_key].size == 100, vim.inspect(idx[ghost_key]))
+
+  -- cleanup removes unindexed files older than max_age, keeps fresh ones
+  local orphan_fresh = cache_dir .. '/orphan-fresh.mp3'
+  write_file(orphan_fresh, string.rep('z', 500))
+  local orphan_old = cache_dir .. '/orphan-old.mp3'
+  write_file(orphan_old, string.rep('z', 500))
+  vim.loop.fs_utime(orphan_old, 1, 1)
+  cache.cleanup()
+  check("cleanup removes an old unindexed file", vim.fn.filereadable(orphan_old) == 0)
+  check("cleanup keeps a fresh unindexed file", vim.fn.filereadable(orphan_fresh) == 1)
+
+  -- clear empties the directory including unindexed files
+  cache.clear()
+  local files = vim.fn.readdir(cache_dir)
+  check("clear empties the directory", #files == 1 and files[1] == 'index.json', vim.inspect(files))
+end)
+
+if not body_ok then
+  failed = failed + 1
+  print(string.format("FAIL: cache test body errored -- %s", tostring(body_err)))
+end
+
+print("=" .. string.rep("=", 60))
+print(string.format("Results: %d passed, %d failed", passed, failed))
+
+if failed > 0 then
+  vim.cmd('cquit 1')
+end
+EOF

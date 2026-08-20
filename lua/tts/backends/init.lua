@@ -71,19 +71,23 @@ function M.speak(text, opts)
 	return current_backend.speak(text, opts)
 end
 
-function M.stop()
+function M.stop(opts)
 	if current_backend and current_backend.stop then
-		current_backend.stop()
+		current_backend.stop(opts)
 
 		local state = require('tts.state')
 		state.transition('stopped')
-		
-		local queue = require('tts.queue')
-		queue.reset_state()
 	end
 end
 
 
+
+function M.prefetch(text, opts)
+  if not current_backend or not current_backend.prefetch then
+    return
+  end
+  current_backend.prefetch(text, opts)
+end
 
 function M.list_voices()
 	if current_backend and current_backend.list_voices then

@@ -100,7 +100,13 @@ function M._get_last_visual()
 end
 
 function M.get_line()
-  return vim.api.nvim_get_current_line()
+  local line = vim.api.nvim_win_get_cursor(0)[1]
+  return vim.api.nvim_get_current_line(), { first = line, last = line }
+end
+
+function M.get_buffer()
+  local lines = vim.api.nvim_buf_get_lines(0, 0, -1, false)
+  return table.concat(lines, '\n'), { first = 1, last = math.max(1, #lines) }
 end
 
 function M.get_section()
@@ -140,7 +146,7 @@ function M.get_section()
   )
   local result = table.concat(lines, '\n')
 
-  return result
+  return result, { first = start_line, last = end_line }
 end
 
 function M.get_paragraph()
@@ -178,7 +184,7 @@ function M.get_paragraph()
   local lines = vim.api.nvim_buf_get_lines(
     0, start_line - 1, end_line, false
   )
-  return table.concat(lines, '\n')
+  return table.concat(lines, '\n'), { first = start_line, last = end_line }
 end
 
 function M.get_motion(motion)
